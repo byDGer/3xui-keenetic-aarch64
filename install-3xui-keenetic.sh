@@ -1,22 +1,18 @@
 #!/bin/sh
 # install-3xui-keenetic.sh: автоматическая установка ПОСЛЕДНЕЙ версии 3x-ui на Keenetic
 # (Entware, aarch64). Панель всегда скачивается из github.com/MHSanaei/3x-ui,
-# управляющий скрипт x-ui.sh берётся из вашего репозитория.
+# управляющий скрипт x-ui.sh берётся из x-ui-keenetic (GitLab).
 #
-# Запуск одной командой через curl (на роутере, по SSH в Entware, от root):
-#   curl -fsSL https://raw.githubusercontent.com/ЛОГИН/РЕПО/main/install-3xui-keenetic.sh | REPO=ЛОГИН/РЕПО sh
-# или так (репозиторий аргументом):
-#   curl -fsSL https://raw.githubusercontent.com/ЛОГИН/РЕПО/main/install-3xui-keenetic.sh | sh -s -- ЛОГИН/РЕПО
+# Запуск одной командой (на роутере, по SSH в Entware, от root):
+#   curl -fsSL https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh | sh
 # Нужны curl и ca-certificates:  opkg update && opkg install curl ca-certificates
 #
-# Необязательные переменные:
-#   REF=main                  ветка или тег репозитория со скриптом x-ui.sh
-#   SCRIPT_PATH=x-ui.sh       путь к x-ui.sh внутри репозитория
+# Необязательная переменная:
+#   XUI_SH_URL=...   откуда брать управляющий скрипт x-ui.sh
+#                    (по умолчанию GitLab own-open-source/x-ui-keenetic)
 set -eu
 
-REPO="${REPO:-${1:-YOUR_USER/YOUR_REPO}}"
-REF="${REF:-main}"
-SCRIPT_PATH="${SCRIPT_PATH:-x-ui.sh}"
+XUI_SH_URL="${XUI_SH_URL:-https://gitlab.com/own-open-source/x-ui-keenetic/-/raw/main/x-ui.sh}"
 PANEL_REPO="MHSanaei/3x-ui"
 
 DIR=/opt/etc/x-ui
@@ -30,7 +26,6 @@ main() {
 
   # --- 1. Проверки ---
   [ "$(id -u)" -eq 0 ] || die "нужен root"
-  [ "$REPO" != "YOUR_USER/YOUR_REPO" ] || die "укажите репозиторий со скриптом: ... | REPO=логин/репозиторий sh   (или sh -s -- логин/репозиторий)"
   [ -x /opt/bin/opkg ] || die "не найден Entware (/opt/bin/opkg). Включите компонент OPKG и установите Entware."
   case "$(uname -m)" in
     aarch64|arm64) ;;
@@ -58,17 +53,17 @@ main() {
   curl -fsIL "$ASSET" >/dev/null 2>&1 || die "в релизе $TAG нет файла x-ui-linux-arm64.tar.gz ($ASSET)"
   echo "    Последняя версия: $TAG"
 
-  # --- 4. Скачиваю x-ui.sh из вашего репозитория ---
-  echo "==> Скачиваю $SCRIPT_PATH из $REPO@$REF"
+  # --- 4. Скачиваю управляющий скрипт x-ui.sh ---
+  echo "==> Скачиваю x-ui.sh"
   mkdir -p "$WORK"
   cd "$WORK"
   rm -f x-ui.sh
-  curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/$SCRIPT_PATH" -o x-ui.sh \
-    || die "не удалось скачать https://raw.githubusercontent.com/$REPO/$REF/$SCRIPT_PATH"
+  curl -fsSL "$XUI_SH_URL" -o x-ui.sh \
+    || die "не удалось скачать $XUI_SH_URL"
   head -n 1 x-ui.sh | grep -q '^#!' || die "скачанный файл не похож на скрипт"
   # панель должна качаться именно с MHSanaei/3x-ui
   grep -q "github.com/$PANEL_REPO/releases/download" x-ui.sh \
-    || die "в x-ui.sh из вашего репозитория панель скачивается не с $PANEL_REPO"
+    || die "в скачанном x-ui.sh панель скачивается не с $PANEL_REPO"
 
   # --- 5. Патчи (проверяются, чтобы молча не пропустить изменение формата скрипта) ---
   # 5a. Не возвращаться в интерактивное меню после установки (3-й аргумент install)
