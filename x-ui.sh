@@ -22,7 +22,7 @@ color_bgreen='\033[1;32m'
 declare -A ICO_MAP=( [GOOD]="[ ✔ ]" [BAD]="[ ✘ ]" [WORK]="[ ⚙ ]" [INF]="[INF]" [ERR]="[ERR]" [WAR]="[⚠️]" )
 
 RECCOMMENDED_VERSION="2.8.5"
-CURRENT_VERSION_SCRIPT="1.0.1"
+CURRENT_VERSION_SCRIPT="1.0.2"
 SCRIPT_REPO="byDGer/3xui-keenetic-aarch64"
 SCRIPT_RAW="https://raw.githubusercontent.com/$SCRIPT_REPO"
 SCRIPT_REF=""
@@ -50,6 +50,7 @@ DIR_DB_IN_JSON="$DIR_PROJECT/db_in_json"
 DIR_CACHE="$DIR_PROJECT/cache"
 DIR_PROJECT_SHELL_SCRIPTS="$DIR_PROJECT/$SHELL_FULL_NAME"
 DIR_CERT="$DIR_PROJECT/cert"
+DIR_ACME="$DIR_ENTWARE/etc/acme.sh"
 DIR_CONFIG="$DIR_PROJECT/config"
 
 DB="$DIR_DB/$SHELL_SHORT_NAME.db"
@@ -1022,6 +1023,157 @@ ssl() {
     fi
 }
 
+acme_run() {
+    "$(command -v sh)" "$DIR_ACME/acme.sh" --home "$DIR_ACME" "$@"
+}
+
+acme_install() {
+    if [[ -f "$DIR_ACME/acme.sh" ]]; then
+        return 0
+    fi
+    logmsg "${color_green}${ICO_MAP[WORK]} Устанавливаю acme.sh...${style_plain}"
+    local tag url archive="$DIR_TMP/acme.sh.tar.gz" src="$DIR_TMP/acme-src"
+    tag=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/acmesh-official/acme.sh/releases/latest" 2>/dev/null | sed -n 's|.*/releases/tag/\(.*\)|\1|p')
+    if [[ -n "$tag" ]]; then
+        url="https://github.com/acmesh-official/acme.sh/archive/refs/tags/${tag}.tar.gz"
+    else
+        url="https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.tar.gz"
+    fi
+    rm -rf "$src" "$archive"
+    mkdir -p "$src" "$DIR_ACME"
+    if ! curl -fsSL "$url" -o "$archive" || ! tar -xzf "$archive" -C "$src" --strip-components=1 || [[ ! -f "$src/acme.sh" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось скачать acme.sh: $url${style_plain}"
+        rm -rf "$src" "$archive"
+        return 1
+    fi
+    cp "$src/acme.sh" "$DIR_ACME/acme.sh"
+    # на Entware нет /usr/bin/env, поэтому прописываем интерпретатор явно
+    sed -i "1s|^#!.*|#!$(command -v sh)|" "$DIR_ACME/acme.sh"
+    chmod 700 "$DIR_ACME/acme.sh"
+    rm -rf "$src" "$archive"
+}
+
+ssl_domain() {
+    echo -e "\n###############################################\n"
+    echo -e "     SSL-СЕРТИФИКАТ ДЛЯ ВАШЕГО ДОМЕНА (Let's Encrypt)"
+    echo -e "\n###############################################\n"
+    logmsg "${color_yellow}${ICO_MAP[WAR]} Что нужно для выпуска сертификата:${style_plain}"
+    echo -e "  1. Домен указывает на внешний IP-адрес роутера (нужен публичный, «белый» IP)."
+    echo -e "  2. Порт 80 на роутере свободен и доступен из интернета: Let's Encrypt проверяет домен по HTTP."
+    echo -e "     Если на порту 80 работает веб-интерфейс роутера, перенесите его на другой порт."
+    echo -e "  3. В межсетевом экране роутера разрешён входящий TCP-порт 80 на время выпуска и продления."
+    confirm_options "Продолжить" "y"
+    if [[ $? != 0 ]]; then
+        return 1
+    fi
+
+    confirm_options "Введите ваш домен (например, router.example.com)" "" "ssl_domain_name" $color_cyan
+    local domain="${map_confirm[ssl_domain_name],,}"
+    domain="${domain#http://}"
+    domain="${domain#https://}"
+    domain="${domain%%/*}"
+    domain="${domain// /}"
+    if [[ ! "$domain" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Неверное доменное имя: '${domain}'. Допустимы латинские буквы, цифры, дефис и точки (без http://, портов и символов подстановки *).${style_plain}"
+        return 1
+    fi
+
+    # --- проверки (только предупреждения) ---
+    local resolved public
+    resolved=$(nslookup "$domain" 2>/dev/null | grep '^Address' | grep -v '#' | grep -Eo '([0-9]+\.){3}[0-9]+' | tail -n1)
+    public=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null)
+    if [[ -z "$resolved" ]]; then
+        logmsg "${color_yellow}${ICO_MAP[WAR]} Не удалось определить IP-адрес домена $domain. Проверьте, что DNS-запись создана.${style_plain}"
+        confirm_options "Всё равно продолжить" "n"
+        [[ $? == 0 ]] || return 1
+    elif [[ -n "$public" && "$resolved" != "$public" ]]; then
+        logmsg "${color_yellow}${ICO_MAP[WAR]} Домен указывает на $resolved, а внешний IP роутера: $public. Выпуск может не пройти.${style_plain}"
+        confirm_options "Всё равно продолжить" "n"
+        [[ $? == 0 ]] || return 1
+    fi
+    if command -v netstat >/dev/null 2>&1 && netstat -ltn 2>/dev/null | grep -Eq '[:.]80[[:space:]]'; then
+        logmsg "${color_yellow}${ICO_MAP[WAR]} Порт 80 на роутере уже занят (например, веб-интерфейсом роутера). acme.sh не сможет его использовать.${style_plain}"
+        confirm_options "Всё равно продолжить" "n"
+        [[ $? == 0 ]] || return 1
+    fi
+
+    # --- зависимости и acme.sh ---
+    logmsg "${color_green}${ICO_MAP[WORK]} Устанавливаю зависимости...${style_plain}"
+    opkg install curl tar openssl-util ca-certificates socat >/dev/null 2>&1
+    if ! command -v socat >/dev/null 2>&1; then
+        opkg update >/dev/null 2>&1
+        opkg install curl tar openssl-util ca-certificates socat >/dev/null 2>&1
+    fi
+    if ! command -v socat >/dev/null 2>&1; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось установить socat (он нужен acme.sh для проверки по порту 80).${style_plain}"
+        return 1
+    fi
+    acme_install || return 1
+
+    # --- выпуск ---
+    local force=""
+    if [[ -d "$DIR_ACME/$domain" ]]; then
+        confirm_options "Сертификат для $domain уже выпускался. Выпустить заново принудительно" "n"
+        [[ $? == 0 ]] && force="--force"
+    fi
+    logmsg "${color_green}${ICO_MAP[WORK]} Запрашиваю сертификат для $domain...${style_plain}"
+    acme_run --issue --standalone --httpport 80 -d "$domain" --server letsencrypt --log "$DIR_ACME/acme.sh.log" $force
+    local rc=$?
+    if [[ $rc -ne 0 && $rc -ne 2 ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось получить сертификат (код $rc).${style_plain}"
+        echo -e "  Частые причины: порт 80 закрыт или занят, домен указывает не на этот роутер,"
+        echo -e "  у провайдера нет публичного IP-адреса, превышен лимит запросов Let's Encrypt."
+        echo -e "  Подробности: $DIR_ACME/acme.sh.log"
+        return 1
+    fi
+
+    # --- установка файлов (путь вида cert/<домен>/ нужен, чтобы панель показала https://<домен>) ---
+    mkdir -p "$DIR_CERT/$domain"
+    acme_run --install-cert -d "$domain" \
+        --fullchain-file "$DIR_CERT/$domain/fullchain.pem" \
+        --key-file "$DIR_CERT/$domain/privkey.pem" \
+        --reloadcmd "PATH=$DIR_ENTWARE/sbin:$DIR_ENTWARE/bin:\$PATH $DIR_ENTWARE/bin/bash $DIR_PROJECT_SHELL_SCRIPTS restart"
+    if [[ $? -ne 0 ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось установить сертификат в $DIR_CERT/$domain/${style_plain}"
+        return 1
+    fi
+    chmod 600 "$DIR_CERT/$domain"/*.pem 2>/dev/null
+    logmsg "${color_green}${ICO_MAP[INF]} Сертификат получен!${style_plain}"
+    echo -e "\n###############################################\n"
+    echo -e "                    ПУТИ SSL"
+    logmsg "${color_green}${ICO_MAP[INF]} Путь к сертификату: $DIR_CERT/$domain/fullchain.pem${style_plain}"
+    logmsg "${color_green}${ICO_MAP[INF]} Путь к ключу: $DIR_CERT/$domain/privkey.pem${style_plain}"
+    echo -e "\n###############################################\n"
+
+    # --- автопродление (сертификат живёт 90 дней) ---
+    if command -v crontab >/dev/null 2>&1; then
+        local cron_line="17 3 * * * $(command -v sh) $DIR_ACME/acme.sh --cron --home $DIR_ACME >/dev/null 2>&1"
+        (crontab -l 2>/dev/null | grep -v 'acme.sh --cron'; echo "$cron_line") | crontab -
+        logmsg "${color_green}${ICO_MAP[INF]} Автопродление добавлено в cron (ежедневная проверка в 03:17).${style_plain}"
+        echo -e "  Для работы автопродления должна быть запущена служба cron."
+    else
+        logmsg "${color_yellow}${ICO_MAP[WAR]} Планировщик cron не найден: автопродления не будет. Сертификат действует 90 дней.${style_plain}"
+        echo -e "  Установите cron (в Entware обычно: opkg install cron) и запустите этот пункт ещё раз,"
+        echo -e "  либо продлевайте вручную: $SHELL_SHORT_NAME ssl_domain"
+    fi
+
+    # --- применение к панели ---
+    confirm_options "Применить сертификат к панели" "y"
+    if [[ $? == 0 ]]; then
+        "$DIR_PROJECT/$NAME_APP" cert -webCert "$DIR_CERT/$domain/fullchain.pem" -webCertKey "$DIR_CERT/$domain/privkey.pem"
+        restart
+        local info=$("$DIR_PROJECT/$NAME_APP" setting -show 2>/dev/null)
+        local p_port=$(echo "$info" | grep -Eo 'port: .+' | awk '{print $2}' | head -n1)
+        local p_path=$(echo "$info" | grep -Eo 'webBasePath: .+' | awk '{print $2}' | head -n1)
+        echo -e "\n###############################################\n"
+        logmsg "${color_green}${ICO_MAP[INF]} Адрес доступа: https://${domain}:${p_port}${p_path}${style_plain}"
+        echo -e "\n###############################################\n"
+        echo -e "  По умолчанию панель слушает только адрес роутера в локальной сети."
+        echo -e "  Чтобы открывать её по домену из интернета, измените IP прослушивания в пункте"
+        echo -e "  «Изменить настройки панели» и откройте порт панели в межсетевом экране роутера."
+    fi
+}
+
 check_panel() {
     pgrep -f $NAME_APP > /dev/null
 }
@@ -1568,6 +1720,7 @@ set_panel::Изменить настройки панели
 view_panel::Показать настройки панели
 [br]
 ssl::Создать самоподписанный SSL-сертификат
+ssl_domain::Получить SSL-сертификат для своего домена (Let's Encrypt)
 [br]
 start::Запустить $SHELL_SHORT_NAME
 stop::Остановить $SHELL_SHORT_NAME
