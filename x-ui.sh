@@ -22,7 +22,10 @@ color_bgreen='\033[1;32m'
 declare -A ICO_MAP=( [GOOD]="[ ✔ ]" [BAD]="[ ✘ ]" [WORK]="[ ⚙ ]" [INF]="[INF]" [ERR]="[ERR]" [WAR]="[⚠️]" )
 
 RECCOMMENDED_VERSION="2.8.5"
-CURRENT_VERSION_SCRIPT="1.0.0"
+CURRENT_VERSION_SCRIPT="1.0.1"
+SCRIPT_REPO="byDGer/3xui-keenetic-aarch64"
+SCRIPT_RAW="https://raw.githubusercontent.com/$SCRIPT_REPO"
+SCRIPT_REF=""
 CURRENT_VERSION_PANEL=""
 LAST_VERSION_PANEL=""
 LAST_VERSION_SCRIPT=""
@@ -157,11 +160,11 @@ NAME_REAL_SHELL=$(real_name)
 check_os_release() {
     local release_path=$(command -v opkg)
     if  [[ "$release_path" != "/opt/bin/opkg" ]]; then
-        logmsg "${color_red}Unsupported the system OS!${style_plain}" && rm -f "$SHELL_FULL_NAME" && exit 1
+        logmsg "${color_red}Неподдерживаемая операционная система!${style_plain}" && rm -f "$SHELL_FULL_NAME" && exit 1
     fi
     release="entware"
     if [[ -z $1 ]]; then
-        logmsg "${ICO_MAP[GOOD]} The OS release is: $release"
+        logmsg "${ICO_MAP[GOOD]} Дистрибутив ОС: $release"
     fi
 }
 check_architecture() {
@@ -173,10 +176,10 @@ check_architecture() {
         armv6* | armv6) ARCHITECTURE='armv6' ;;
         armv5* | armv5) ARCHITECTURE='armv5' ;;
         s390x) ARCHITECTURE='s390x' ;;
-        *) logmsg "${color_red}Unsupported CPU architecture! ${style_plain}" && rm -f "$SHELL_FULL_NAME" && exit 1 ;;
+        *) logmsg "${color_red}Неподдерживаемая архитектура процессора! ${style_plain}" && rm -f "$SHELL_FULL_NAME" && exit 1 ;;
     esac
     if [[ -z $1 ]]; then
-        logmsg "${ICO_MAP[GOOD]} ARCHITECTURE: $ARCHITECTURE"
+        logmsg "${ICO_MAP[GOOD]} Архитектура: $ARCHITECTURE"
     fi  
 }
 # END PREPARATION ------------------------------------------------------------
@@ -184,6 +187,15 @@ check_architecture() {
 get_menu_word() {
     local menu="$1"
     local number="$2"
+    local key
+    # у пунктов вида "ключ::Русский текст" имя функции хранится в menu_key_list
+    if [[ -n "$menu_key_list" && "$number" =~ ^[0-9]+$ ]]; then
+        key=$(echo "$menu_key_list" | grep -m1 "^${number}:" | cut -d: -f2-)
+        if [[ -n "$key" ]]; then
+            echo "$key" | tr '[:upper:]' '[:lower:]'
+            return
+        fi
+    fi
     echo "$menu" \
       | sed -E 's/\x1B\[[0-9;?]*[ -/]*[@-~]//g' \
       | grep -E "\(${number}\)" \
@@ -193,21 +205,21 @@ get_menu_word() {
 
 install_base() {
     check_architecture
-    logmsg "${ICO_MAP[WORK]} ${color_green}Checking preparation... not panic! ;) ${style_plain}"
+    logmsg "${ICO_MAP[WORK]} ${color_green}Проверка подготовки... без паники! ;) ${style_plain}"
     sleep 1
     case "${release}" in
     entware)
         opkg update && opkg install wget curl tar wget-ssl ca-certificates sqlite3-cli jq openssl-util libopenssl
         ;;
-    *) logmsg "${color_red}Unsupported release! ${release}" && rm -f "$SHELL_FULL_NAME" && exit 1
+    *) logmsg "${color_red}Неподдерживаемый релиз! ${release}" && rm -f "$SHELL_FULL_NAME" && exit 1
 		;;
     esac
 }
 
 migration(){
-    logmsg "${ICO_MAP[WORK]} ${color_yellow}Migration... ${style_plain}"
+    logmsg "${ICO_MAP[WORK]} ${color_yellow}Миграция... ${style_plain}"
     $DIR_PROJECT/$NAME_APP migrate
-    logmsg "${ICO_MAP[GOOD]} ${color_yellow}Migration finished!${style_plain}"
+    logmsg "${ICO_MAP[GOOD]} ${color_yellow}Миграция завершена!${style_plain}"
 }
 
 config_after_install() {
@@ -237,8 +249,8 @@ check_show_main_menu(){
 menu_choice(){
 local menu=$1
 local choice=$2
-local txt=${3:-"Please enter your selection"}
-local default_choice=$( [ -n "$4" ] && echo " [default: $4]" || echo "" )
+local txt=${3:-"Введите номер пункта"}
+local default_choice=$( [ -n "$4" ] && echo " [по умолчанию: $4]" || echo "" )
 local skip_cache=$5
 local patern=${6:-"get_menu_word"}
     if [[ -z "$choice" ]]; then
@@ -260,12 +272,12 @@ update_panel(){
     check_install
     last_version_checked "$NAME_APP"
     if [[ "v$CURRENT_VERSION_PANEL" == "$LAST_VERSION_PANEL" ]]; then
-        logmsg "${color_green}You are already using the latest version $NAME_APP: v${CURRENT_VERSION_PANEL}${style_plain}"
+        logmsg "${color_green}Установлена последняя версия $NAME_APP: v${CURRENT_VERSION_PANEL}${style_plain}"
     else
-        logmsg "${color_yellow}A new version $NAME_APP is available: ${LAST_VERSION_PANEL}, you are using: v${CURRENT_VERSION_PANEL}${style_plain}"
-        confirm_options "This function will forcefully reinstall the latest version $NAME_APP, and the data will not be lost. Do you want to continue"
+        logmsg "${color_yellow}Доступна новая версия $NAME_APP: ${LAST_VERSION_PANEL}, у вас: v${CURRENT_VERSION_PANEL}${style_plain}"
+        confirm_options "Будет принудительно переустановлена последняя версия $NAME_APP, данные не пропадут. Продолжить"
         if [ $? == 0 ]; then
-            logmsg "${color_bg_white}Beginning the update $NAME_APP..."
+            logmsg "${color_bg_white}Начинаю обновление $NAME_APP..."
             install $NAME_APP $LAST_VERSION_PANEL $1
         fi
     fi
@@ -274,13 +286,18 @@ update_panel(){
 update_script(){
     check_install
     last_version_checked "script"
+    if [[ -z "$LAST_VERSION_SCRIPT" ]]; then
+        logmsg "${ICO_MAP[BAD]} ${color_red}Не удалось получить версию скрипта, попробуйте позже${style_plain}"
+        return 1
+    fi
     if [[ "$CURRENT_VERSION_SCRIPT" == "$LAST_VERSION_SCRIPT" ]]; then
-        logmsg "${color_green}You are already using the latest version script: ${CURRENT_VERSION_SCRIPT}${style_plain}"
+        logmsg "${color_green}Установлена последняя версия скрипта: ${CURRENT_VERSION_SCRIPT}${style_plain}"
     else
-        logmsg "${color_yellow}A new version script is available: ${LAST_VERSION_SCRIPT}, you are using: ${CURRENT_VERSION_SCRIPT}${style_plain}"
-        confirm_options "This function will forcefully reinstall the latest version script, and the data will not be lost. Do you want to continue"
+        logmsg "${color_yellow}Доступна новая версия скрипта: ${LAST_VERSION_SCRIPT}, у вас: ${CURRENT_VERSION_SCRIPT}${style_plain}"
+        confirm_options "Будет принудительно переустановлена последняя версия скрипта, данные не пропадут. Продолжить"
         if [ $? == 0 ]; then
-            logmsg "${color_bg_white}Beginning the update script..."
+            logmsg "${color_bg_white}Начинаю обновление скрипта..."
+            SCRIPT_REF=main
             install script $LAST_VERSION_SCRIPT $1
         fi
     fi
@@ -302,13 +319,13 @@ update_all(){
 
 update(){
     check_install
-    menu_choice menu_update "$1" "Please choose an update you want to perform"
+    menu_choice menu_update "$1" "Выберите действие обновления"
     safe_call_function "$schoice"
 }
 
 last_version_checked(){
     if [[ "$LAST_VERSION_SCRIPT" == "" && $1 == "script" ]]; then
-        LAST_VERSION_SCRIPT=$(curl -s https://gitlab.com/own-open-source/x-ui-keenetic/-/releases/permalink/latest | grep -m1 -Eo "releases/[^/]+\"" | awk 'BEGIN { FS="/" } {print $2}' | rev | cut -c2- | rev)
+        LAST_VERSION_SCRIPT=$(curl -fsSL "$SCRIPT_RAW/main/$SHELL_FULL_NAME" 2>/dev/null | grep -m1 '^CURRENT_VERSION_SCRIPT=' | cut -d'"' -f2)
         return 1
     fi
     if [[ "$LAST_VERSION_PANEL" == "" && $1 == "$NAME_APP" ]]; then
@@ -324,23 +341,25 @@ download_proc() {
     local type="${1,,}"
     local version_to_check
     
+    local outfile="$DIR_TMP/$SHELL_SHORT_NAME-$type.tar.gz"
     if [[ $type == "script" ]]; then
         version_to_check="${version_type}${LAST_VERSION_SCRIPT}"
-        url="https://gitlab.com/own-open-source/x-ui-keenetic/-/archive/${version_to_check}/x-ui-keenetic-${version_to_check}.tar.gz"
+        url="$SCRIPT_RAW/${SCRIPT_REF:-$version_to_check}/$SHELL_FULL_NAME"
+        outfile="$DIR_TMP/$SHELL_SHORT_NAME-script.new"
     fi
     if [[ $type == "${NAME_APP,,}" ]]; then
         version_to_check="${version_type}${LAST_VERSION_PANEL}"
         url="https://github.com/MHSanaei/3x-ui/releases/download/${version_to_check}/x-ui-linux-${ARCHITECTURE}.tar.gz"
     fi
     
-    wget --no-check-certificate -O $DIR_TMP/"$SHELL_SHORT_NAME"-"$type".tar.gz "${url}"
+    wget --no-check-certificate -O "$outfile" "${url}"
     if [[ $? -ne 0 ]]; then
         if [[ $version_to_check != v* && -z $version_type ]]; then
-            logmsg "${ICO_MAP[GOOD]} Try download again with ${color_magenta}v${style_plain}"
+            logmsg "${ICO_MAP[GOOD]} Повторная попытка загрузки с ${color_magenta}v${style_plain}"
             download_proc $type "v"
             return $?
         elif [[ $version_to_check == v* && -z $version_type ]]; then
-            logmsg "${ICO_MAP[GOOD]} Try download again without ${color_magenta}v${style_plain}"
+            logmsg "${ICO_MAP[GOOD]} Повторная попытка загрузки без ${color_magenta}v${style_plain}"
             download_proc $type ""
             return $?
         else 
@@ -352,15 +371,15 @@ download_proc() {
 }
 
 clear_all_cache(){
-    confirm_options "Do you really want to delete all cache files"
+    confirm_options "Вы действительно хотите удалить все файлы кэша"
     if [[ $? == 0 ]]; then
-        clear_cache && logmsg "${ICO_MAP[GOOD]} ${color_green}All cache cleared.${style_plain}"
+        clear_cache && logmsg "${ICO_MAP[GOOD]} ${color_green}Кэш полностью очищен.${style_plain}"
     fi
 }
 
 clear_cache(){
     if [[ -d "$DIR_CACHE" ]]; then
-        logmsg "${ICO_MAP[WORK]} ${color_green}Clearing cache...${style_plain}"
+        logmsg "${ICO_MAP[WORK]} ${color_green}Очистка кэша...${style_plain}"
         rm -rf "$DIR_CACHE" 2>/dev/null
     fi
 }
@@ -376,7 +395,7 @@ install() {
         fi
         clear_cache && delete_config
     fi
-    logmsg "${ICO_MAP[WORK]} ${color_green}Checking repository availability...${style_plain}"
+    logmsg "${ICO_MAP[WORK]} ${color_green}Проверка доступности репозитория...${style_plain}"
     cd $DIR_TMP || return
     if [[ -z $2 ]]; then
         last_version_checked $1
@@ -385,21 +404,21 @@ install() {
         LAST_VERSION_PANEL=${LAST_VERSION_PANEL#v}
         if [ $# == 0 ]; then
             if [[ ! -n "$LAST_VERSION_PANEL" ]]; then
-                logmsg "${ICO_MAP[BAD]} ${color_red}Failed to fetch $SHELL_SHORT_NAME version, please try it later${style_plain}"
+                logmsg "${ICO_MAP[BAD]} ${color_red}Не удалось получить версию $SHELL_SHORT_NAME, попробуйте позже${style_plain}"
                 return
             fi
-            logmsg "${ICO_MAP[GOOD]} Got $SHELL_SHORT_NAME latest version: ${color_magenta}${LAST_VERSION_PANEL}${style_plain}, beginning the installation..."
+            logmsg "${ICO_MAP[GOOD]} Последняя версия $SHELL_SHORT_NAME: ${color_magenta}${LAST_VERSION_PANEL}${style_plain}, начинаю установку..."
             download_proc $1
             if [[ $? -ne 0 ]]; then
-                logmsg "${ICO_MAP[BAD]} ${color_red}Downloading $SHELL_SHORT_NAME failed${style_plain}"
+                logmsg "${ICO_MAP[BAD]} ${color_red}Не удалось скачать $SHELL_SHORT_NAME${style_plain}"
                 return
             fi
         else
             LAST_VERSION_PANEL=$2
-            logmsg "${ICO_MAP[WORK]} Beginning the install ${color_magenta}$SHELL_SHORT_NAME $LAST_VERSION_PANEL${style_plain}"
+            logmsg "${ICO_MAP[WORK]} Начинаю установку ${color_magenta}$SHELL_SHORT_NAME $LAST_VERSION_PANEL${style_plain}"
             download_proc $1
             if [[ $? -ne 0 ]]; then
-                logmsg "${ICO_MAP[BAD]} ${color_red}download $SHELL_SHORT_NAME $LAST_VERSION_PANEL failed,please check the version exists: ${url}${style_plain}"
+                logmsg "${ICO_MAP[BAD]} ${color_red}не удалось скачать $SHELL_SHORT_NAME $LAST_VERSION_PANEL, проверьте, что такая версия существует: ${url}${style_plain}"
                 return
             fi
         fi
@@ -416,43 +435,49 @@ install() {
         else
             migration
         fi
-        logmsg "${ICO_MAP[GOOD]} ${color_green}$SHELL_SHORT_NAME $LAST_VERSION_PANEL${style_plain} installation finished..."
-        logmsg "You may access the Panel with following URL(s):${color_green}"
+        logmsg "${ICO_MAP[GOOD]} ${color_green}$SHELL_SHORT_NAME $LAST_VERSION_PANEL${style_plain} установка завершена..."
+        logmsg "Панель доступна по следующим адресам:${color_green}"
         view_panel
         check_all_ruls 1 2>/dev/null
         rm -rf $SHELL_SHORT_NAME 2>/dev/null
     elif [[ $1 == "script" ]]; then
         if [ $# == 0 ]; then
             if [[ ! -n "$LAST_VERSION_SCRIPT" ]]; then
-                logmsg "${ICO_MAP[BAD]} ${color_red}Failed to fetch script version, please try it later${style_plain}"
+                logmsg "${ICO_MAP[BAD]} ${color_red}Не удалось получить версию скрипта, попробуйте позже${style_plain}"
                 return
             fi
-            logmsg "${ICO_MAP[GOOD]} Got script latest version: ${LAST_VERSION_SCRIPT}, beginning the installation..."
+            logmsg "${ICO_MAP[GOOD]} Последняя версия скрипта: ${LAST_VERSION_SCRIPT}, начинаю установку..."
             download_proc $1
             if [[ $? -ne 0 ]]; then
-                logmsg "${ICO_MAP[BAD]} ${color_red}Downloading script failed${style_plain}"
+                logmsg "${ICO_MAP[BAD]} ${color_red}Не удалось скачать скрипт${style_plain}"
                 return
             fi
         else
             LAST_VERSION_SCRIPT=$2
-            logmsg "${ICO_MAP[WORK]} Beginning the install script ${color_magenta}$LAST_VERSION_SCRIPT${style_plain}"
+            logmsg "${ICO_MAP[WORK]} Начинаю установку скрипта ${color_magenta}$LAST_VERSION_SCRIPT${style_plain}"
             download_proc $1
             if [[ $? -ne 0 ]]; then
-                logmsg "${ICO_MAP[BAD]} ${color_red}download script $LAST_VERSION_SCRIPT failed,please check the version exists: ${url}${style_plain}"
+                logmsg "${ICO_MAP[BAD]} ${color_red}не удалось скачать скрипт $LAST_VERSION_SCRIPT, проверьте, что такая версия существует: ${url}${style_plain}"
                 return
             fi
         fi
-        tar zxvf $SHELL_SHORT_NAME-"$1".tar.gz
-        mv -f -- $DIR_TMP/$SHELL_SHORT_NAME-keenetic-${LAST_VERSION_SCRIPT}/$SHELL_FULL_NAME $DIR_PROJECT_SHELL_SCRIPTS
-        rm -rf $DIR_TMP/$SHELL_SHORT_NAME-keenetic-${LAST_VERSION_SCRIPT}
+        if ! head -n 1 "$DIR_TMP/$SHELL_SHORT_NAME-script.new" | grep -q '^#!'; then
+            logmsg "${ICO_MAP[BAD]} ${color_red}Скачанный файл не похож на скрипт: ${url}${style_plain}"
+            rm -f "$DIR_TMP/$SHELL_SHORT_NAME-script.new"
+            SCRIPT_REF=""
+            return
+        fi
+        mv -f -- "$DIR_TMP/$SHELL_SHORT_NAME-script.new" $DIR_PROJECT_SHELL_SCRIPTS
+        chmod +x $DIR_PROJECT_SHELL_SCRIPTS
+        SCRIPT_REF=""
     else
-        logmsg "${ICO_MAP[BAD]} ${color_red}Unknown installation type: $1${style_plain}"
+        logmsg "${ICO_MAP[BAD]} ${color_red}Неизвестный тип установки: $1${style_plain}"
         return
     fi
     rm $SHELL_SHORT_NAME-"$1".tar.gz -f
     permissions
-    logmsg "${ICO_MAP[GOOD]} ${style_reverse}$1 version ${LAST_VERSION_PANEL} installed successfully!${style_plain}"
-    logmsg "${style_reverse}To access the script, type: $SHELL_SHORT_NAME${style_plain}"
+    logmsg "${ICO_MAP[GOOD]} ${style_reverse}$1: версия ${LAST_VERSION_PANEL} успешно установлена!${style_plain}"
+    logmsg "${style_reverse}Для запуска скрипта введите: $SHELL_SHORT_NAME${style_plain}"
     it_was_updated=1 && mkdir -p "$DIR_PROJECT/new"
     if [[ -z $3 ]]; then
         before_show_main_menu $DIR_PROJECT_SHELL_SCRIPTS
@@ -461,12 +486,12 @@ install() {
 
 custom() {
     if [[ -z "$2" ]]; then
-        confirm_options "Enter the $1 version (like 0.0.1)" "" "panel_version_$1"  $color_cyan
+        confirm_options "Введите версию $1 (например, 0.0.1)" "" "panel_version_$1"  $color_cyan
     else
         map_confirm["panel_version_$1"]=$2
     fi
     if [ -z "${map_confirm[panel_version_$1]}" ]; then
-        echo "Panel version cannot be empty!"
+        echo "Версия панели не может быть пустой!"
 		return 1
     fi
 	install $1 "${map_confirm[panel_version_$1]}" "$3"
@@ -474,6 +499,10 @@ custom() {
 
 install_custom_PANEL(){
     custom $NAME_APP "" 1
+}
+
+install_custom_panel(){
+    install_custom_PANEL
 }
 
 install_custom_script(){
@@ -490,22 +519,22 @@ install_custom(){
 
 uninstall() {
     if [[ ! -f $DIR_PROJECT/$NAME_APP ]]; then
-    logmsg "${color_red}The panel is not installed!${style_plain}"
+    logmsg "${color_red}Панель не установлена!${style_plain}"
 	else
-		confirm_options "Are you sure you want to uninstall the panel" "n" "" "$color_red"
+		confirm_options "Вы уверены, что хотите удалить панель" "n" "" "$color_red"
 		if [[ $? == 0 ]]; then
             if [[ -d $DIR_PROJECT ]]; then
-            logmsg "${color_yellow}Uninstalling... ${style_plain}"
+            logmsg "${color_yellow}Удаление... ${style_plain}"
             stop && disable
             rm -rf "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME"
             rm -rf $DIR_INSTALL_LNK
             rm -rf $DIR_PROJECT
-            logmsg "${color_yellow}Uninstalled Successfully${style_plain}"
-            logmsg "${color_yellow}Log was saved to $DIR_LOGFILE!${style_plain}"
-            logmsg "${color_yellow}For deletion:${style_plain} ${color_magenta}rm -rf $DIR_LOGFILE${style_plain}"
-			echo "$SHELL_SHORT_NAME was" && kill -9 $$
+            logmsg "${color_yellow}Успешно удалено${style_plain}"
+            logmsg "${color_yellow}Журнал сохранён в $DIR_LOGFILE!${style_plain}"
+            logmsg "${color_yellow}Для удаления:${style_plain} ${color_magenta}rm -rf $DIR_LOGFILE${style_plain}"
+			echo "$SHELL_SHORT_NAME удалён" && kill -9 $$
 			else
-                logmsg "${color_red}The panel is not installed! ${style_plain}"
+                logmsg "${color_red}Панель не установлена! ${style_plain}"
 			fi
 		fi
 	fi
@@ -514,7 +543,7 @@ uninstall() {
 # START PANEL COMMANDS ---------------------------------------------------------
 safe_call_command() {
     if [ $# -lt 1 ]; then
-        logmsg "${color_red}${ICO_MAP[ERR]} No command given to safe_call_command ${style_plain}"
+        logmsg "${color_red}${ICO_MAP[ERR]} Не указана команда для safe_call_command ${style_plain}"
         return 1
     fi
     local cmd="$1"; shift
@@ -530,7 +559,7 @@ safe_call_command() {
                 now="$(date '+%Y-%m-%d %H:%M:%S')"
                 local script_name="${0:-$NAME_REAL_SHELL}"
                 local lineno="${BASH_LINENO[0]:-?}"
-                local raw_err="${script_name}: line ${lineno}: ${cmd}: command not found"
+                local raw_err="${script_name}: строка ${lineno}: ${cmd}: команда не найдена"
                 echo "[$now] [ERR] $raw_err" >> "$DIR_LOGFILE" 2>/dev/null
             fi
             logmsg "${color_red}${ICO_MAP[ERR]} $raw_err${style_plain}"
@@ -541,7 +570,7 @@ safe_call_command() {
 
 safe_call_function() {
     if [ $# -lt 1 ]; then
-        logmsg "${color_red}${ICO_MAP[ERR]} No command given to safe_call_function${style_plain}"
+        logmsg "${color_red}${ICO_MAP[ERR]} Не указана команда для safe_call_function${style_plain}"
         return 1
     fi
     local cmd="$1"; shift
@@ -554,7 +583,7 @@ safe_call_function() {
             now="$(date '+%Y-%m-%d %H:%M:%S')"
             local script_name="${0:-$NAME_REAL_SHELL}"
             local lineno="${BASH_LINENO[0]:-?}"
-            local raw_err="${script_name}: line ${lineno}: ${cmd}: function not found"
+            local raw_err="${script_name}: строка ${lineno}: ${cmd}: функция не найдена"
             echo "[$now] [ERR] $raw_err" >> "$DIR_LOGFILE" 2>/dev/null
         fi
         logmsg "${color_red}${ICO_MAP[ERR]} $raw_err${style_plain}"
@@ -570,10 +599,17 @@ confirm_options() {
     logmsg "question: $question, default: $default, confirm_type: $confirm_type, txtcolor: $txtcolor" nolog
     echo ""
     if [[ -z "$3" ]]; then
-        confirm_type="[y/n]"
+        confirm_type="[д/н]"
+    fi
+    local default_show="$default"
+    if [[ -n "$confirm_type" ]]; then
+        case "${default,,}" in
+            y) default_show="д" ;;
+            n) default_show="н" ;;
+        esac
     fi
     if [[ -n "$default" ]]; then
-        echo -n -e "${txtcolor}$question $confirm_type? [default: $default]:${style_plain}" && read -p " " temp
+        echo -n -e "${txtcolor}$question $confirm_type? [по умолчанию: $default_show]:${style_plain}" && read -p " " temp
         if [[ "${temp}" == "" ]]; then
             temp=$default
         fi
@@ -582,35 +618,34 @@ confirm_options() {
     fi
     logmsg "Choice: $temp" nolog
     if [[ -n "$confirm_type" ]]; then
-        if [[ "${temp^^}" == "Y" ]]; then
-            return 0
-        else
-            return 1
-        fi
+        case "$temp" in
+            y|Y|yes|YES|Yes|д|Д|да|ДА|Да) return 0 ;;
+            *) return 1 ;;
+        esac
     else
         if [[ -n "$3" ]]; then
             map_confirm["$3"]="$temp"
         else
-            logmsg "${color_red}${ICO_MAP[ERR]} No variable name provided for storing the input.${style_plain}"
+            logmsg "${color_red}${ICO_MAP[ERR]} Не указано имя переменной для сохранения ввода.${style_plain}"
             exit 1
         fi
     fi
 }
 
 confirm_restart() {
-    confirm_options "Restart the $SHELL_SHORT_NAME service" "y"
+    confirm_options "Перезапустить службу $SHELL_SHORT_NAME" "y"
     if [[ $? == 0 ]]; then
         restart
     fi
 }
 
 reset_admin() {
-    confirm_options "Are you sure you want to reset admin's credentials to default" "n"
+    confirm_options "Вы уверены, что хотите сбросить учётные данные администратора к значениям по умолчанию" "n"
     if [[ $? == 0 ]]; then
         local usernameTemp=$(head -c 6 /dev/urandom | base64)
         local passwordTemp=$(head -c 6 /dev/urandom | base64)
         exe_set_admin "$usernameTemp" "$passwordTemp" "true"
-        logmsg "${color_red}${ICO_MAP[INF]} Admin's credentials have been reset to default${style_plain}"
+        logmsg "${color_red}${ICO_MAP[INF]} Учётные данные администратора сброшены${style_plain}"
 		show_admin "$usernameTemp" "$passwordTemp"
         confirm_restart
     fi
@@ -618,87 +653,87 @@ reset_admin() {
 
 show_admin() {
     echo -e "###############################################"
-    echo -e "${color_green}Username: ${1}${style_plain}"
-    echo -e "${color_green}Password: ${2}${style_plain}"
+    echo -e "${color_green}Логин: ${1}${style_plain}"
+    echo -e "${color_green}Пароль: ${2}${style_plain}"
     echo -e "###############################################"
 }
 
 exe_set_admin() {
-        confirm_options "Please set up your username" "${1:-admin}" "config_account"  $color_cyan
-        confirm_options "Please set up your password" "${2:-12345}" "config_password" $color_cyan
-		confirm_options "Do you want to disable currently configured two-factor authentication" "${3:-false}" "config_authentication" $color_cyan
+        confirm_options "Укажите логин" "${1:-admin}" "config_account"  $color_cyan
+        confirm_options "Укажите пароль" "${2:-12345}" "config_password" $color_cyan
+		confirm_options "Отключить текущую двухфакторную аутентификацию (true/false)" "${3:-false}" "config_authentication" $color_cyan
         $DIR_PROJECT/$NAME_APP setting -username ${map_confirm[config_account]} -password ${map_confirm[config_password]} -resetTwoFactor ${map_confirm[config_authentication]}
 		show_admin "${map_confirm[config_account]}" "${map_confirm[config_password]}"
 }
 
 set_admin() {
-    confirm_options "Are you sure you want to set admin's credentials" "n"
+    confirm_options "Вы уверены, что хотите задать учётные данные администратора" "n"
     if [[ $? == 0 ]]; then
         exe_set_admin
-        logmsg "${color_red}${ICO_MAP[INF]} Admin's credentials have been set${style_plain}"
+        logmsg "${color_red}${ICO_MAP[INF]} Учётные данные администратора заданы${style_plain}"
         confirm_restart
     fi
 }
 
 reset_panel() {
-    confirm_options "Are you sure you want to reset all panel settings. Account data will not be lost. Username and password will not change" "n"
+    confirm_options "Вы уверены, что хотите сбросить все настройки панели. Данные учётной записи сохранятся: логин и пароль не изменятся" "n"
     if [[ $? == 0 ]]; then
         $DIR_PROJECT/$NAME_APP setting -reset
-        logmsg "${ICO_MAP[INF]}All panel settings have been reset to default!" && view_panel && confirm_restart
+        logmsg "${ICO_MAP[INF]}Все настройки панели сброшены к значениям по умолчанию!" && view_panel && confirm_restart
     fi
 }
 
 restart() {
     $SHELL_SHORT_NAME stop 1 && sleep 1 && $SHELL_SHORT_NAME start 1 && sleep 1
     check_status; local status=$?
-    [[ $status == 0 ]] && logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME Restarted successfully${style_plain}" || logmsg "${color_red}${ICO_MAP[ERR]}Failed to restart $SHELL_SHORT_NAME, Probably because it takes longer than two seconds to start, Please check the log information later${style_plain}"
+    [[ $status == 0 ]] && logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME успешно перезапущен${style_plain}" || logmsg "${color_red}${ICO_MAP[ERR]}Не удалось перезапустить $SHELL_SHORT_NAME, возможно, запуск занимает больше двух секунд. Проверьте журнал позже${style_plain}"
 }
 
 ssl_check(){
 	local certs=$($DIR_PROJECT/$NAME_APP setting -getCert)
 	if [[ -z "$certs" ]]; then
-		logmsg "${color_yellow}SSL certificate is not configured now!${style_plain}"
+		logmsg "${color_yellow}SSL-сертификат сейчас не настроен!${style_plain}"
 	else
-		logmsg "${color_green}SSL certificate is configured properly:${style_plain}"
+		logmsg "${color_green}SSL-сертификат настроен:${style_plain}"
     	echo -e "\n###############################################\n"
-    	echo -e "                 SSL IN PANEL"
+    	echo -e "                 SSL В ПАНЕЛИ"
 		logmsg "$certs"
     	echo -e "\n###############################################\n"
 	fi
 
-    confirm_options "Do you want to set an SSL certificate for the panel" "n"
+    confirm_options "Задать SSL-сертификат для панели" "n"
     if [[ $? == 0 ]]; then
     	local count=$(ls -1 "$DIR_CERT"/*.* 2>/dev/null | wc -l)
 		if [[ $count -ge 2 ]]; then
-			logmsg "We found $count cert files in $DIR_CERT/"
+			logmsg "Найдено файлов сертификатов: $count в $DIR_CERT/"
 			ls -l "$DIR_CERT"
 		fi
-		confirm_options "Enter the panel webCert public" "$DIR_CERT/webCert.pem" "config_webCert" $color_cyan
-		confirm_options "Enter the panel webCertKey private" "$DIR_CERT/webCertKey.pem" "config_webCertKey" $color_cyan
+		confirm_options "Путь к публичному сертификату панели (webCert)" "$DIR_CERT/webCert.pem" "config_webCert" $color_cyan
+		confirm_options "Путь к приватному ключу панели (webCertKey)" "$DIR_CERT/webCertKey.pem" "config_webCertKey" $color_cyan
 		local params=""
 		[ -z "${map_confirm[config_webCert]}" ] || params="$params -webCert ${map_confirm[config_webCert]}"
 		[ -z "${map_confirm[config_webCertKey]}" ] || params="$params -webCertKey ${map_confirm[config_webCertKey]}"
-		logmsg "${color_yellow}Initializing, please wait...${style_plain}"
+		logmsg "${color_yellow}Инициализация, подождите...${style_plain}"
 		$DIR_PROJECT/$NAME_APP cert ${params}
-		echo -e "" && logmsg "${color_green}Initializing complete!${style_plain}"	
+		echo -e "" && logmsg "${color_green}Инициализация завершена!${style_plain}"	
 		return 0
 	fi
 	return 1
 }
 
 exe_set_panel() {
-	confirm_options "Enter the panel port" "2053" "config_port" $color_cyan
-	confirm_options "Enter the panel path" "/spub/" "config_path" $color_cyan
-	confirm_options "Enter the listen IP" "$(ifconfig br0 | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')" "config_listenIP" $color_cyan
-	logmsg "${color_yellow}Initializing, please wait...${style_plain}"
+	confirm_options "Введите порт панели" "2053" "config_port" $color_cyan
+	confirm_options "Введите путь к панели" "/spub/" "config_path" $color_cyan
+	confirm_options "Введите IP-адрес для прослушивания" "$(ifconfig br0 | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')" "config_listenIP" $color_cyan
+	logmsg "${color_yellow}Инициализация, подождите...${style_plain}"
 	local params=""
 	[ -z "${map_confirm[config_port]}" ] || params="$params -port ${map_confirm[config_port]}"
 	[ -z "${map_confirm[config_path]}" ] || params="$params -webBasePath ${map_confirm[config_path]}"
 	[ -z "${map_confirm[config_listenIP]}" ] || params="$params -listenIP ${map_confirm[config_listenIP]}"
 	$DIR_PROJECT/$NAME_APP setting ${params}
-	echo -e "" && logmsg "${color_green}Initializing complete!${style_plain}"
+	echo -e "" && logmsg "${color_green}Инициализация завершена!${style_plain}"
     if [[ -z $1 ]]; then
-		confirm_options "Do you want to check and change the SSL certificate" "n"
+		confirm_options "Проверить и изменить SSL-сертификат" "n"
 		if [[ $? -eq 0 ]]; then
 			ssl_check
 		fi
@@ -707,7 +742,7 @@ exe_set_panel() {
 }
 
 set_panel() {
-    confirm_options "Are you sure you want to set panel settings" "n"
+    confirm_options "Вы уверены, что хотите изменить настройки панели" "n"
     if [[ $? == 0 ]]; then
         exe_set_panel && confirm_restart
     fi
@@ -716,7 +751,7 @@ set_panel() {
 view_panel() {
    local info=$("$DIR_PROJECT/$NAME_APP" setting -show)
     if [[ $? != 0 ]]; then
-        logmsg "get current settings error, please check logs"
+        logmsg "ошибка получения текущих настроек, проверьте журнал"
         return
     fi
 	local existing_cert_path=$("$DIR_PROJECT/$NAME_APP" setting -getCert)
@@ -729,23 +764,23 @@ view_panel() {
         server_ip=$(curl -s --max-time 3 https://4.ident.me)
     fi
     echo -e "\n###############################################\n"
-	echo -e "In panel listen IP: $existing_ip\n"
+	echo -e "IP-адрес прослушивания панели: $existing_ip\n"
 	echo -e "$info\n"
 	echo -e "$existing_cert_path\n"
     if [[ -n "$existing_cert" ]]; then
         local domain=$(basename "$(dirname "$existing_cert")")
 
         if [[ "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-            echo -e "${green}Access URL: https://${domain}:${existing_port}${existing_webBasePath}${plain}\n"
+            echo -e "${green}Адрес доступа: https://${domain}:${existing_port}${existing_webBasePath}${plain}\n"
         else
-            echo -e "${green}Access URL: https://${server_ip}:${existing_port}${existing_webBasePath}${plain}\n"
+            echo -e "${green}Адрес доступа: https://${server_ip}:${existing_port}${existing_webBasePath}${plain}\n"
         fi
     else
-        echo -e "${green}Access URL: http://${server_ip}:${existing_port}${existing_webBasePath}${plain}\n"
+        echo -e "${green}Адрес доступа: http://${server_ip}:${existing_port}${existing_webBasePath}${plain}\n"
     fi
 	local localip=$(ifconfig br0 | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
 	if [[ -n "$localip" ]]; then
-		echo -e "${green}Local Access URL: http://${localip}:${existing_port}${existing_webBasePath}${plain}\n"
+		echo -e "${green}Локальный адрес доступа: http://${localip}:${existing_port}${existing_webBasePath}${plain}\n"
 	fi
     echo -e "###############################################"
 }
@@ -754,21 +789,21 @@ start() {
     check_status; local status=$?
     if [[ $status == 0 ]]; then
         echo ""
-        logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME is running, no need to start again!${style_plain}"
+        logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME уже запущен, повторный запуск не требуется!${style_plain}"
     else
         tmpfile=$(mktemp)
         nice -n -19 "$DIR_PROJECT/$NAME_APP" run >"$tmpfile" 2>&1 & disown
         output=$(cat "$tmpfile")
         echo "$output" >> "$DIR_LOGFILE"
         rm -f "$tmpfile"
-        logmsg "${ICO_MAP[WORK]} loading..."
+        logmsg "${ICO_MAP[WORK]} загрузка..."
         sleep 1
         if ! check_panel; then
-            logmsg "${ICO_MAP[BAD]} Error: $SHELL_SHORT_NAME failed to start"
+            logmsg "${ICO_MAP[BAD]} Ошибка: не удалось запустить $SHELL_SHORT_NAME"
         fi
         sleep 2
         check_status; local status2=$?
-        [[ $status2 == 0 ]] && logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME started successfully${style_plain}" || logmsg "${color_red}${ICO_MAP[ERR]} failed to start $SHELL_SHORT_NAME, probably because it takes longer than two seconds to start, please check the log information later${style_plain}"
+        [[ $status2 == 0 ]] && logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME успешно запущен${style_plain}" || logmsg "${color_red}${ICO_MAP[ERR]} не удалось запустить $SHELL_SHORT_NAME, возможно, запуск занимает больше двух секунд. Проверьте журнал позже${style_plain}"
     fi
 }
 
@@ -776,17 +811,17 @@ stop() {
     check_status; local status=$?
     if [[ $status == 1 ]]; then
         echo ""
-        logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME stopped, no need to stop again!${style_plain}"
+        logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME уже остановлен, повторная остановка не требуется!${style_plain}"
     else
         if killall $DIR_PROJECT/$NAME_APP 2>/dev/null; then
             killall -q -KILL $DIR_PROJECT/$NAME_APP
-            logmsg "${ICO_MAP[GOOD]} $SHELL_SHORT_NAME stopped"
+            logmsg "${ICO_MAP[GOOD]} $SHELL_SHORT_NAME остановлен"
         else
-            logmsg "${ICO_MAP[GOOD]} $SHELL_SHORT_NAME was already stopped!"
+            logmsg "${ICO_MAP[GOOD]} $SHELL_SHORT_NAME уже был остановлен!"
         fi
         sleep 2
         check_status; local status2=$?
-        [[ $status2 == 1 ]] && logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME stopped successfully${style_plain}" || logmsg "${color_red}${ICO_MAP[ERR]}failed to stop $SHELL_SHORT_NAME, probably because the stop time exceeds two seconds, please check the log information later${style_plain}"
+        [[ $status2 == 1 ]] && logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME успешно остановлен${style_plain}" || logmsg "${color_red}${ICO_MAP[ERR]}не удалось остановить $SHELL_SHORT_NAME, возможно, остановка занимает больше двух секунд. Проверьте журнал позже${style_plain}"
     fi
 }
 
@@ -800,42 +835,42 @@ check() {
 
 status() {
 	if check_panel; then
-    logmsg "${ICO_MAP[GOOD]}  $SHELL_SHORT_NAME running"
+    logmsg "${ICO_MAP[GOOD]}  $SHELL_SHORT_NAME работает"
 	else
-    logmsg "${ICO_MAP[GOOD]}  $SHELL_SHORT_NAME stopped"
+    logmsg "${ICO_MAP[GOOD]}  $SHELL_SHORT_NAME остановлен"
 	fi
 }
 
 enable() {
     if [[ -L "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME" || -f "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME" ]]; then
-        logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME was is enable${style_plain}"
+        logmsg "${color_green}${ICO_MAP[INF]} Автозапуск $SHELL_SHORT_NAME уже включён${style_plain}"
     else
         ln -s "$DIR_PROJECT_SHELL_SCRIPTS" "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME"
         if [[ $? == 0 ]]; then
-            logmsg "${color_green}${ICO_MAP[INF]} Set $SHELL_SHORT_NAME to boot automatically on startup successfully${style_plain}"
+            logmsg "${color_green}${ICO_MAP[INF]} Автозапуск $SHELL_SHORT_NAME при загрузке успешно включён${style_plain}"
             dos2unix "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME" 2>/dev/null 
             chmod +x "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME" 2>/dev/null 
         else
-            logmsg "${color_red}${ICO_MAP[ERR]} Failed to set $SHELL_SHORT_NAME Autostart${style_plain}"
+            logmsg "${color_red}${ICO_MAP[ERR]} Не удалось включить автозапуск $SHELL_SHORT_NAME${style_plain}"
         fi
     fi
 }
 
 disable() {
     if [[ ! -L "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME" && ! -f "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME" ]]; then
-        logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME was disabled${style_plain}"
+        logmsg "${color_green}${ICO_MAP[INF]} Автозапуск $SHELL_SHORT_NAME уже отключён${style_plain}"
     else
         rm -rf "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME"
         if [[ $? == 0 ]]; then
-            logmsg "${color_green}${ICO_MAP[INF]} Autostart $SHELL_SHORT_NAME Cancelled successfully${style_plain}"
+            logmsg "${color_green}${ICO_MAP[INF]} Автозапуск $SHELL_SHORT_NAME успешно отключён${style_plain}"
         else
-            logmsg "${color_red}${ICO_MAP[ERR]} Failed to cancel $SHELL_SHORT_NAME autostart${style_plain}"
+            logmsg "${color_red}${ICO_MAP[ERR]} Не удалось отключить автозапуск $SHELL_SHORT_NAME${style_plain}"
         fi
     fi
 }
 
 editor(){
-        confirm_options "We recommend using editor: $DEFAULT_EDITOR. Would you like to try it" "y"
+        confirm_options "Рекомендуем редактор: $DEFAULT_EDITOR. Установить его" "y"
         if [[ $? == 0 ]]; then
             opkg install $DEFAULT_EDITOR
         fi
@@ -845,34 +880,33 @@ edit_settings() {
     if [[ -f "$DIR_CONFIG/settings" ]]; then
         safe_call_command $DEFAULT_EDITOR $DIR_CONFIG/settings
         if [[ ! $? -eq 0 ]]; then
-            logmsg "${color_yellow}${ICO_MAP[WAR]} Can't open settings file with $DEFAULT_EDITOR.${style_plain}"
+            logmsg "${color_yellow}${ICO_MAP[WAR]} Не удаётся открыть файл настроек в $DEFAULT_EDITOR.${style_plain}"
             editor && safe_call_command $DEFAULT_EDITOR $DIR_CONFIG/settings
         fi
     else
-        logmsg "${color_red}Settings file does not exist! ${style_plain}"
+        logmsg "${color_red}Файл настроек не существует! ${style_plain}"
     fi
-    logmsg "${color_red}${ICO_MAP[INF]} Settings file path: $DIR_CONFIG/settings${style_plain}"
+    logmsg "${color_red}${ICO_MAP[INF]} Путь к файлу настроек: $DIR_CONFIG/settings${style_plain}"
 }
 
 log() {
     if [[ -f $DIR_LOGFILE ]]; then
         safe_call_command $DEFAULT_EDITOR $DIR_LOGFILE
         if [[ ! $? -eq 0 ]]; then
-            logmsg "${color_yellow}${ICO_MAP[WAR]} Falling back to cat command for log viewing.${style_plain}"
+            logmsg "${color_yellow}${ICO_MAP[WAR]} Для просмотра журнала будет использован другой способ.${style_plain}"
             editor && safe_call_command $DEFAULT_EDITOR $DIR_LOGFILE
         fi
     else
-        logmsg "${color_red}Log file does not exist! ${style_plain}"
+        logmsg "${color_red}Файл журнала не существует! ${style_plain}"
     fi
-    logmsg "${color_red}${ICO_MAP[INF]} Log file path: $DIR_LOGFILE${style_plain}"
+    logmsg "${color_red}${ICO_MAP[INF]} Путь к файлу журнала: $DIR_LOGFILE${style_plain}"
 }
 
 check_status() {
 	if [[ ! -f "$DIR_PROJECT/$NAME_APP" ]]; then
 		return 2
 	fi
-	local temp=$( status | grep -o "running")
-	if [[ "${temp,,}" == "running" ]]; then
+	if check_panel; then
 		return 0
 	else
 		return 1
@@ -892,7 +926,7 @@ check_uninstall() {
     check_status
     if [[ $? != 2 ]]; then
         echo ""
-    logmsg "${color_red}${ICO_MAP[ERR]} Panel is already installed. To install a new or custom version, please uninstall the current panel and $SHELL_SHORT_NAME first.${style_plain}"
+    logmsg "${color_red}${ICO_MAP[ERR]} Панель уже установлена. Чтобы установить другую или свою версию, сначала удалите текущую панель и $SHELL_SHORT_NAME.${style_plain}"
         return 1
     else
         return 0
@@ -902,7 +936,7 @@ check_uninstall() {
 check_install() {
     check_status
     if [[ $? == 2 ]]; then
-        logmsg "${color_red}${ICO_MAP[ERR]} Please install the panel first${style_plain}"
+        logmsg "${color_red}${ICO_MAP[ERR]} Сначала установите панель${style_plain}"
         return 1
     else
         return 0
@@ -913,15 +947,15 @@ show_status() {
     check_status
     case $? in
     0)
-		logmsg "${color_black}${color_bg_white}${SHELL_SHORT_NAME^^} state:${style_plain} ${color_green}Running${style_plain}"
+		logmsg "${color_black}${color_bg_white}Состояние ${SHELL_SHORT_NAME^^}:${style_plain} ${color_green}Работает${style_plain}"
         show_enable_status
         ;;
     1)
-        logmsg "${color_black}${color_bg_white}${SHELL_SHORT_NAME^^} state:${style_plain} ${color_yellow}Not Running${style_plain}"
+        logmsg "${color_black}${color_bg_white}Состояние ${SHELL_SHORT_NAME^^}:${style_plain} ${color_yellow}Не работает${style_plain}"
         show_enable_status
         ;;
     2)
-        logmsg "${color_black}${color_bg_white}${SHELL_SHORT_NAME^^} state:${style_plain} ${color_red}Not Installed${style_plain}"
+        logmsg "${color_black}${color_bg_white}Состояние ${SHELL_SHORT_NAME^^}:${style_plain} ${color_red}Не установлена${style_plain}"
         ;;
     esac
 }
@@ -929,19 +963,19 @@ show_status() {
 show_enable_status() {
     check_enabled
     if [[ $? == 0 ]]; then
-        logmsg "${color_black}${color_bg_white}Start $SHELL_SHORT_NAME automatically:${style_plain} ${color_green}Yes${style_plain}"
+        logmsg "${color_black}${color_bg_white}Автозапуск $SHELL_SHORT_NAME:${style_plain} ${color_green}Да${style_plain}"
     else
-        logmsg "${color_black}${color_bg_white}Start $SHELL_SHORT_NAME automatically:${style_plain} ${color_red}No${style_plain}"
+        logmsg "${color_black}${color_bg_white}Автозапуск $SHELL_SHORT_NAME:${style_plain} ${color_red}Нет${style_plain}"
     fi
 }
 
 ssl() {
-    confirm_options "Do you want to generate a Self-signed Certificate?" "y"
+    confirm_options "Создать самоподписанный сертификат" "y"
     if [[ $? == 0 ]]; then
         if [[ ! -d $DIR_CERT ]]; then
             mkdir -p $DIR_CERT
         fi
-    menu_choice menu_ssl "$1" "Choose certificate type:"
+    menu_choice menu_ssl "$1" "Выберите тип сертификата:"
     case ${schoice=$?,,} in
             ed25519)
                     key_opt="ed25519"
@@ -959,31 +993,31 @@ ssl() {
                     key_opt="ec -pkeyopt ec_paramgen_curve:secp384r1"
                 ;;
             *)
-                logmsg "${color_red}${ICO_MAP[ERR]} Invalid choice! Return: $schoice${style_plain}"
+                logmsg "${color_red}${ICO_MAP[ERR]} Неверный выбор! Результат: $schoice${style_plain}"
                 return 1
                 ;;
         esac
-        confirm_options "Please choose DNS" "example.com" "schoice_DNS"  $color_cyan
+        confirm_options "Укажите доменное имя (DNS)" "example.com" "schoice_DNS"  $color_cyan
         cd $DIR_CERT || return
-        logmsg "${color_green}${ICO_MAP[INF]} Generating self-signed certificate ($schoice)...${style_plain}"
+        logmsg "${color_green}${ICO_MAP[INF]} Создание самоподписанного сертификата ($schoice)...${style_plain}"
 		openssl req -x509 -nodes -days 3650 -newkey "$key_opt" -keyout "$DIR_CERT/webCertKey.pem" -out "$DIR_CERT/webCert.pem" -subj "/CN=${map_confirm[schoice_DNS]}"
         if [[ $? -eq 0 ]]; then
             chmod -R 600 "$DIR_CERT"
-            logmsg "${color_green}${ICO_MAP[INF]} Self-signed certificate generated successfully!${style_plain}"
+            logmsg "${color_green}${ICO_MAP[INF]} Самоподписанный сертификат успешно создан!${style_plain}"
 			echo -e "\n###############################################\n"
-			echo -e "                    SSL PATH"
-            logmsg "${color_green}${ICO_MAP[INF]} Certificate path: $DIR_CERT/webCert.pem${style_plain}"
-            logmsg "${color_green}${ICO_MAP[INF]} Key path: $DIR_CERT/webCertKey.pem${style_plain}"
+			echo -e "                    ПУТИ SSL"
+            logmsg "${color_green}${ICO_MAP[INF]} Путь к сертификату: $DIR_CERT/webCert.pem${style_plain}"
+            logmsg "${color_green}${ICO_MAP[INF]} Путь к ключу: $DIR_CERT/webCertKey.pem${style_plain}"
 			echo -e "\n###############################################\n"
 			ssl_check
 			if [[ $? == 0 ]]; then
-				confirm_options "Do you want to check and change the IP address of the panel (RECOMMENDED!)" "y"
+				confirm_options "Проверить и изменить IP-адрес панели (РЕКОМЕНДУЕТСЯ!)" "y"
 				if [[ $? == 0 ]]; then
 					exe_set_panel 1
 				fi
 			fi
         else
-            logmsg "${color_red}${ICO_MAP[ERR]} Failed to generate self-signed certificate.${style_plain}"
+            logmsg "${color_red}${ICO_MAP[ERR]} Не удалось создать самоподписанный сертификат.${style_plain}"
         fi
     fi
 }
@@ -1015,6 +1049,10 @@ menu_numeric_choice(){
 local name_menu=${2:-"$1"}
 local cache=$2
 menu_numeric_choice_list=""
+menu_key_list=""
+if [[ -d "$DIR_CACHE/menu" && ! -f "$DIR_CACHE/.lang_ru" ]]; then
+    rm -rf "$DIR_CACHE/menu"
+fi
 if [[ -z "$2" ]]; then
     local menu="${!name_menu}"
 else
@@ -1039,7 +1077,12 @@ else
             menu_numeric_choice_list+="${menu_numeric_choice_br_list}"
             max_num_of_choices=$((max_num_of_choices-1))
         else
-    menu_numeric_choice_list+="${color_blue}($max_num_of_choices)${style_plain}$([[ $max_num_of_choices -lt 10 ]] && echo "  " || echo " ")[${menu_arr[$i]}]
+    local item_label="${menu_arr[$i]}"
+    if [[ "$item_label" == *"::"* ]]; then
+        menu_key_list+="${max_num_of_choices}:${item_label%%::*}"$'\n'
+        item_label="${item_label#*::}"
+    fi
+    menu_numeric_choice_list+="${color_blue}($max_num_of_choices)${style_plain}$([[ $max_num_of_choices -lt 10 ]] && echo "  " || echo " ")[${item_label}]
     "
         fi
     done
@@ -1047,10 +1090,12 @@ else
     if [[ -z $cache && -z $no_cache_needed ]]; then
         if [[ ! -d "$DIR_CACHE/menu" ]]; then
             mkdir -p "$DIR_CACHE/menu"
+            touch "$DIR_CACHE/.lang_ru"
         fi
         echo -e "menu_numeric_choice_list=\"$menu_numeric_choice_list\"" >> "$DIR_CACHE/menu/$name_menu"
         echo -e "start_index=\"$start_index\"" >> "$DIR_CACHE/menu/$name_menu"
         echo -e "max_num_of_choices=\"$max_num_of_choices\"" >> "$DIR_CACHE/menu/$name_menu"
+        echo -e "menu_key_list=\"$menu_key_list\"" >> "$DIR_CACHE/menu/$name_menu"
     fi
 fi
 }
@@ -1062,14 +1107,14 @@ backup(){
     fi
     now=$(date +"%Y_%m_%d_%H_%M_%S")
     filename="backup_$now.db"
-    menu_choice menu_archive "$1" "Choose compression method" "no_compression"
+    menu_choice menu_archive "$1" "Выберите способ сжатия" "no_compression"
     if ! command -v $schoice >/dev/null 2>&1; then
-        confirm_options "Compression tool '$schoice' is not installed. Please install it" "y" "" $color_red
+        confirm_options "Утилита сжатия '$schoice' не установлена. Установить её" "y" "" $color_red
             if [[ $? == 0 ]]; then
-                logmsg "Installing compression tool: $schoice"
+                logmsg "Установка утилиты сжатия: $schoice"
                 opkg update && opkg install "$schoice"
             else
-                logmsg "Operation cancelled. Backup not created."
+                logmsg "Операция отменена. Резервная копия не создана."
                 return 1
             fi
     fi
@@ -1081,37 +1126,37 @@ backup(){
             if [[ -n ${ext_map_zip[$schoice]} ]]; then
                 safe_call_command "$schoice" "${ext_map_zip[$schoice]:+"-c"}" "$DB" > "$DIR_PROJECT/backup/db/$filename${ext_map_zip[$schoice]}"
             else
-                logmsg "${color_red}${ICO_MAP[ERR]} Unsupported compression method${style_plain}"
+                logmsg "${color_red}${ICO_MAP[ERR]} Неподдерживаемый способ сжатия${style_plain}"
                 return 1
             fi
             ;;
     esac
     local tmpfile=$(ls -1 $DIR_PROJECT/backup/db/$filename* 2>/dev/null)
     if [[ -n $tmpfile ]]; then
-        logmsg "${color_green}${ICO_MAP[INF]} Backup created without $schoice: $DIR_PROJECT/backup/db/$filename${style_plain}"
+        logmsg "${color_green}${ICO_MAP[INF]} Резервная копия создана ($schoice): $DIR_PROJECT/backup/db/$filename${style_plain}"
     else
-        logmsg "${color_red}${ICO_MAP[ERR]} Failed to create backup!${style_plain}"
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось создать резервную копию!${style_plain}"
     fi
-    echo -e "" && logmsg "Available backups:" && echo -e ""
+    echo -e "" && logmsg "Доступные резервные копии:" && echo -e ""
     ls -1 "$DIR_PROJECT/backup/db/"
     echo -e ""
 }
 
 delete_old_backups(){
     if [ ! "$(ls -A "$DIR_PROJECT/backup/db")" ]; then
-        logmsg "${color_red}${ICO_MAP[ERR]} No backups found.${style_plain}"
+        logmsg "${color_red}${ICO_MAP[ERR]} Резервные копии не найдены.${style_plain}"
     else
-        echo -e "" && logmsg "Available backups:" && echo -e ""
+        echo -e "" && logmsg "Доступные резервные копии:" && echo -e ""
         ls -1 "$DIR_PROJECT/backup/db/"
         echo -e ""
-        confirm_options "How many recent backups do you want to keep? Please enter a number" "100500" "num_keep"  $color_cyan
+        confirm_options "Сколько последних резервных копий оставить? Введите число" "100500" "num_keep"  $color_cyan
         if [[ ${map_confirm[num_keep]} =~ ^[0-9]+$ ]]; then
             ls -1t $DIR_PROJECT/backup/db | tail -n +$((${map_confirm[num_keep]} + 1)) | xargs -I{} rm -- "$DIR_PROJECT/backup/db/{}"
-            echo -e "" && logmsg "Available backups:" && echo -e ""
+            echo -e "" && logmsg "Доступные резервные копии:" && echo -e ""
             ls -1 "$DIR_PROJECT/backup/db/"
             echo -e ""
         else
-            logmsg "${color_red}${ICO_MAP[ERR]} Invalid number entered!${style_plain}"
+            logmsg "${color_red}${ICO_MAP[ERR]} Введено неверное число!${style_plain}"
         fi	
     fi
 }
@@ -1121,16 +1166,16 @@ restore(){
     is_files=("$DIR_PROJECT/backup/db"/*)
     is_files=( "${is_files[@]}" )
     if [[ ! -e "${is_files[0]}" ]]; then
-        logmsg "No backup files found."
+        logmsg "Файлы резервных копий не найдены."
     else
         files=$(ls $DIR_PROJECT/backup/db/)
-        menu_choice "$files" "" "Choose which backup to restore" "" "skip"
+        menu_choice "$files" "" "Выберите копию для восстановления" "" "skip"
         selected_file="$schoice"
         fullpath="$DIR_PROJECT/backup/db/$selected_file"
         if [[ -f "$fullpath" ]]; then
-            confirm_options "Are you sure you want to restore from $selected_file... this will overwrite current data." "y"
+            confirm_options "Вы уверены, что хотите восстановить данные из $selected_file... Текущие данные будут перезаписаны." "y"
             if [[ $? == 0 ]]; then
-                logmsg "${color_yellow}${ICO_MAP[WAR]} Deleting old database file: $DB${style_plain}"
+                logmsg "${color_yellow}${ICO_MAP[WAR]} Удаление старого файла базы данных: $DB${style_plain}"
                 rm -rf $DB
                 ext=${selected_file##*.}
                 case ${ext=$?,,} in
@@ -1141,24 +1186,24 @@ restore(){
                         if [[ -n ${ext_map_unzip[$ext]} ]]; then
                             safe_call_command "${ext_map_unzip[$ext]}" -dc "$fullpath" > "$DB"
                         else
-                            logmsg "${color_red}${ICO_MAP[ERR]} Unsupported backup file extension${style_plain}"
+                            logmsg "${color_red}${ICO_MAP[ERR]} Неподдерживаемое расширение файла резервной копии${style_plain}"
                             return 1
                         fi
                         ;;
                 esac
                 if [[ -f "$DB" ]]; then
-                    logmsg "${color_green}${ICO_MAP[INF]} Database restored from $selected_file successfully. Ext: $ext${style_plain}"
+                    logmsg "${color_green}${ICO_MAP[INF]} База данных успешно восстановлена из $selected_file. Расширение: $ext${style_plain}"
                     vacuum && integrity_check 
 					confirm_restart
-                    logmsg "${color_green}${ICO_MAP[INF]} Restore completed: $DB. Please verify the panel functionality.${style_plain}"
+                    logmsg "${color_green}${ICO_MAP[INF]} Восстановление завершено: $DB. Проверьте работу панели.${style_plain}"
                 else
-                    logmsg "${color_red}${ICO_MAP[ERR]} Failed to restore database from $selected_file.${style_plain}"
+                    logmsg "${color_red}${ICO_MAP[ERR]} Не удалось восстановить базу данных из $selected_file.${style_plain}"
                 fi
             else
-                logmsg "Restore cancelled."
+                logmsg "Восстановление отменено."
             fi
         else
-            logmsg "${color_red}${ICO_MAP[ERR]} Backup file $selected_file not found! Ext: $ext${style_plain}"
+            logmsg "${color_red}${ICO_MAP[ERR]} Файл резервной копии $selected_file не найден! Расширение: $ext${style_plain}"
         fi
     fi
 }
@@ -1174,27 +1219,27 @@ settings(){
 }
 
 vacuum(){
-    confirm_options "Do you want to perform VACUUM on the database to optimize it" "y"
+    confirm_options "Выполнить VACUUM базы данных для оптимизации" "y"
     if [[ $? == 0 ]]; then
-        logmsg "${ICO_MAP[WORK]} Performing VACUUM on database..."
+        logmsg "${ICO_MAP[WORK]} Выполняется VACUUM базы данных..."
         sqlite3 "$DB" "VACUUM;"
         if [ $? -eq 0 ]; then
-            logmsg "${ICO_MAP[GOOD]} Database VACUUM completed successfully."
+            logmsg "${ICO_MAP[GOOD]} VACUUM базы данных успешно выполнен."
         else
-            logmsg "${ICO_MAP[BAD]} Database VACUUM failed."
+            logmsg "${ICO_MAP[BAD]} Не удалось выполнить VACUUM базы данных."
         fi
     fi
 }
 
 integrity_check(){
-    confirm_options "Do you want to perform an integrity check on the database" "y"
+    confirm_options "Проверить целостность базы данных" "y"
     if [[ $? == 0 ]]; then
-        logmsg "${ICO_MAP[WORK]} Performing integrity check on database..."
+        logmsg "${ICO_MAP[WORK]} Проверка целостности базы данных..."
         result=$(sqlite3 "$DB" "PRAGMA integrity_check;")
         if [ "$result" == "ok" ]; then
-            logmsg "${ICO_MAP[GOOD]} Database integrity check passed."
+            logmsg "${ICO_MAP[GOOD]} Проверка целостности базы данных пройдена."
         else
-            logmsg "${ICO_MAP[BAD]} Database integrity check failed: $result"
+            logmsg "${ICO_MAP[BAD]} Проверка целостности базы данных не пройдена: $result"
         fi
     fi
 }
@@ -1206,20 +1251,20 @@ db_management(){
 
 delete_config(){
     if [[ -d "$DIR_CACHE" ]]; then
-        logmsg "${ICO_MAP[WORK]} ${color_green}Clearing cache...${style_plain}"
+        logmsg "${ICO_MAP[WORK]} ${color_green}Очистка кэша...${style_plain}"
         rm -rf "$DIR_CACHE" 2>/dev/null
 		is_files=("$DIR_DB_IN_JSON/"/*)
 		is_files=( "${is_files[@]}" )
 		if [[ ! -e "${is_files[0]}" ]]; then
-			logmsg "Files in $DIR_DB_IN_JSON/ deleted"
+			logmsg "Файлы в $DIR_DB_IN_JSON/ удалены"
 		else
-            logmsg "Files not found"
+            logmsg "Файлы не найдены"
         fi
     fi
 }
 
 delete_all_json(){
-    confirm_options "Do you really want to delete all json files"
+    confirm_options "Вы действительно хотите удалить все json-файлы"
     if [[ $? == 0 ]]; then
         delete_config
     fi
@@ -1229,9 +1274,9 @@ restore_db_from_json() {
     local count
     count=$(ls -1 "$DIR_DB_IN_JSON"/*.json 2>/dev/null | wc -l)
     if [[ ! $count -ge 7 ]]; then
-        logmsg "${ICO_MAP[BAD]} Not enough config json files found in $DIR_DB_IN_JSON/ (found: $count, required >= 7). Restore aborted."
+        logmsg "${ICO_MAP[BAD]} Недостаточно json-файлов конфигурации в $DIR_DB_IN_JSON/ (найдено: $count, требуется не менее 7). Восстановление прервано."
     else
-    confirm_options "Do you want to restore config from backup json files" "y"
+    confirm_options "Восстановить конфигурацию из резервных json-файлов" "y"
         if [[ $? == 0 ]]; then
             $0 stop
             quote_or_null() {
@@ -1245,8 +1290,8 @@ restore_db_from_json() {
                         printf "'%s'" "$v"
                     fi
             }
-        [ ! -d "$DIR_DB_IN_JSON" ] && { logmsg "${ICO_MAP[BAD]} Directory $DIR_DB_IN_JSON not found"; return 1; }
-        logmsg "${ICO_MAP[WORK]} Restoring from $DIR_DB_IN_JSON..."
+        [ ! -d "$DIR_DB_IN_JSON" ] && { logmsg "${ICO_MAP[BAD]} Каталог $DIR_DB_IN_JSON не найден"; return 1; }
+        logmsg "${ICO_MAP[WORK]} Восстановление из $DIR_DB_IN_JSON..."
             ERR=0
             sqlite3 "$DB" "BEGIN;" || ERR=1
             for f in "$DIR_DB_IN_JSON"/*.json; do
@@ -1255,11 +1300,11 @@ restore_db_from_json() {
                 tbl="${base%.json}"
                 case "$base" in
                     stats.json|changes.json)
-                        logmsg "${ICO_MAP[WORK]} Skipping $base (excluded)"
+                        logmsg "${ICO_MAP[WORK]} Пропуск $base (исключено)"
                         continue
                         ;;
                 esac
-        logmsg "${ICO_MAP[WORK]} Processing table $tbl..."
+        logmsg "${ICO_MAP[WORK]} Обработка таблицы $tbl..."
         mapfile -t cols < <(sqlite3 -separator '|' "$DB" "PRAGMA table_info(\"$tbl\");" | awk -F'|' '{print $2":"$3}')
                 jq -c '.[]' "$f" | while read -r row; do
                     fields=()
@@ -1290,7 +1335,7 @@ restore_db_from_json() {
                     printf "INSERT OR REPLACE INTO \"%s\" (%s) VALUES (%s);\n" \
                         "$tbl" "$(IFS=,; echo "${fields[*]}")" "$(IFS=,; echo "${values[*]}")"
                 done | sqlite3 "$DB" || ERR=1
-            [ $ERR -eq 0 ] && logmsg "${ICO_MAP[GOOD]} $tbl restored" || logmsg "${ICO_MAP[BAD]} Restore error for $tbl"
+            [ $ERR -eq 0 ] && logmsg "${ICO_MAP[GOOD]} $tbl восстановлена" || logmsg "${ICO_MAP[BAD]} Ошибка восстановления $tbl"
             done
             $0 start
             vacuum && integrity_check
@@ -1300,21 +1345,21 @@ restore_db_from_json() {
 
 save_db_to_json() {
     if [[ ! -f "$DB" ]]; then
-        logmsg "${ICO_MAP[BAD]} Database file not found: $DB"
+        logmsg "${ICO_MAP[BAD]} Файл базы данных не найден: $DB"
         return 1
     fi
     mkdir -p "$DIR_DB_IN_JSON"
     local tables
     tables=$(sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
     if [[ -z "$tables" ]]; then
-        logmsg "${ICO_MAP[BAD]} No tables found in database. Run: $SHELL_SHORT_NAME install or $NAME_APP migrate"
+        logmsg "${ICO_MAP[BAD]} В базе данных нет таблиц. Выполните: $SHELL_SHORT_NAME install или $NAME_APP migrate"
         return 1
     fi
     local exported=0 skipped=0
     for tbl in $tables; do
         case "$tbl" in
             stats|changes)
-                logmsg "${ICO_MAP[WORK]} Skipping $tbl (excluded)"
+                logmsg "${ICO_MAP[WORK]} Пропуск $tbl (исключено)"
                 skipped=$((skipped+1))
                 continue
                 ;;
@@ -1336,7 +1381,7 @@ save_db_to_json() {
         done <<< "$pragma"
         select_list=${select_list# , }
         if [[ -z "$select_list" ]]; then
-            logmsg "${ICO_MAP[BAD]} Table $tbl has no columns, skipping"
+            logmsg "${ICO_MAP[BAD]} В таблице $tbl нет столбцов, пропуск"
             skipped=$((skipped+1))
             continue 
         fi
@@ -1364,10 +1409,10 @@ JQ
                 echo "$tmp_json" | jq '.' > "$DIR_DB_IN_JSON/$tbl.json"
             fi
         fi
-        logmsg "${ICO_MAP[GOOD]} Exported: $DIR_DB_IN_JSON/$tbl.json"
+        logmsg "${ICO_MAP[GOOD]} Экспортировано: $DIR_DB_IN_JSON/$tbl.json"
         exported=$((exported+1))
     done
-    logmsg "${ICO_MAP[WORK]} Build complete. Exported: $exported, skipped: $skipped"
+    logmsg "${ICO_MAP[WORK]} Готово. Экспортировано: $exported, пропущено: $skipped"
 }
 
 permissions(){
@@ -1433,12 +1478,12 @@ version_panel(){
 # END PANEL COMMANDS ---------------------------------------------------------
 # START MENU ------------------------------------------------------------
 bye(){
-    logmsg "${color_yellow}Bye...${style_plain}"
+    logmsg "${color_yellow}До свидания...${style_plain}"
     echo -e "" && exit 0
 }
 
 before_show_main_menu() {
-	echo -e "" && echo -n -e "${color_yellow}\u2190 Press enter to return to the main menu${style_plain}" && read temp
+	echo -e "" && echo -n -e "${color_yellow}\u2190 Нажмите Enter для возврата в главное меню${style_plain}" && read temp
     if [[ -n $1 ]]; then
         exec $1
     else
@@ -1451,17 +1496,17 @@ before_show_main_menu() {
 }
 
 speedtest() {
-	confirm_options "Do you want to run a speed test for $SHELL_SHORT_NAME" "y"
+	confirm_options "Запустить тест скорости для $SHELL_SHORT_NAME" "y"
 	if [[ $? == 0 ]]; then
-		logmsg "${ICO_MAP[WORK]} Running speed test..."
+		logmsg "${ICO_MAP[WORK]} Запуск теста скорости..."
 		safe_call_command iperf3 -Vc speedtest.serverius.net -p 5002
-		logmsg "${ICO_MAP[INF]} Speed test completed."
+		logmsg "${ICO_MAP[INF]} Тест скорости завершён."
 	fi
 }
 
 update_geo() {
 
-    menu_choice menu_update_geo_list "$1" "Choose certificate type:"
+    menu_choice menu_update_geo_list "$1" "Выберите набор данных:"
     
     cd "$DIR_PROJECT/bin/" || return
 	if [[ -n $schoice ]]; then
@@ -1472,19 +1517,19 @@ update_geo() {
         rm -f geoip.dat geosite.dat
         wget -N https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
         wget -N https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
-        echo -e "${green}Loyalsoldier datasets have been updated successfully!${plain}"
+        echo -e "${green}Наборы данных Loyalsoldier успешно обновлены!${plain}"
         ;;
     chocolate4u)
         rm -f geoip_IR.dat geosite_IR.dat
         wget -O geoip_IR.dat -N https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat
         wget -O geosite_IR.dat -N https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geosite.dat
-        echo -e "${green}chocolate4u datasets have been updated successfully!${plain}"
+        echo -e "${green}Наборы данных chocolate4u успешно обновлены!${plain}"
         ;;
     runetfreedom)
         rm -f geoip_RU.dat geosite_RU.dat
         wget -O geoip_RU.dat -N https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat
         wget -O geosite_RU.dat -N https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat
-        echo -e "${green}runetfreedom datasets have been updated successfully!${plain}"
+        echo -e "${green}Наборы данных runetfreedom успешно обновлены!${plain}"
         ;;
     esac
 	if [[ -n $schoice ]]; then
@@ -1493,104 +1538,104 @@ update_geo() {
 }
 
 repair(){
-    confirm_options "Do you really want to repair $SHELL_SHORT_NAME installation?" "n"
+    confirm_options "Вы действительно хотите восстановить установку $SHELL_SHORT_NAME" "n"
     if [[ $? == 0 ]]; then
-		logmsg "${ICO_MAP[WORK]} Repairing $SHELL_SHORT_NAME installation..."
+		logmsg "${ICO_MAP[WORK]} Восстановление установки $SHELL_SHORT_NAME..."
         permissions && check_all_ruls 1 && migration && vacuum && integrity_check
-		logmsg "${ICO_MAP[INF]} Repairing completed."
+		logmsg "${ICO_MAP[INF]} Восстановление завершено."
 		confirm_restart
     fi
 }
 
-menu_exit="${color_magenta}Exit${style_plain}
+menu_exit="exit::${color_magenta}Выход${style_plain}
 [br]
 "
 menu_install="
-Install $SHELL_SHORT_NAME ${color_green}(latest version recommended:$RECCOMMENDED_VERSION)${style_plain}
-Custom $SHELL_SHORT_NAME version Install ${color_yellow}(Not recommended)${style_plain}
+install::Установить $SHELL_SHORT_NAME ${color_green}(рекомендуется последняя версия: $RECCOMMENDED_VERSION)${style_plain}
+custom::Установить свою версию $SHELL_SHORT_NAME ${color_yellow}(не рекомендуется)${style_plain}
 "
-menu_extra="Update Check
-Uninstall $SHELL_SHORT_NAME Panel
-Install_Custom $NAME_APP/script version  ${color_yellow}(Not recommended)${style_plain}
+menu_extra="update::Проверка обновлений
+uninstall::Удалить панель $SHELL_SHORT_NAME
+install_custom::Установить свою версию $NAME_APP/скрипта  ${color_yellow}(не рекомендуется)${style_plain}
 [br]
-Settings Management
-Log Check $SHELL_SHORT_NAME
+settings::Управление настройками
+log::Просмотр журнала $SHELL_SHORT_NAME
 [br]
-Reset_admin credentials to default
-Set_admin credentials
-Reset_Panel Settings
-Set_Panel settings
-View_Panel Settings
+reset_admin::Сбросить учётные данные администратора
+set_admin::Задать учётные данные администратора
+reset_panel::Сбросить настройки панели
+set_panel::Изменить настройки панели
+view_panel::Показать настройки панели
 [br]
-SSL Self-signed Certificate Generation
+ssl::Создать самоподписанный SSL-сертификат
 [br]
-Start $SHELL_SHORT_NAME
-Stop $SHELL_SHORT_NAME
-Restart $SHELL_SHORT_NAME
-Status Check $SHELL_SHORT_NAME
+start::Запустить $SHELL_SHORT_NAME
+stop::Остановить $SHELL_SHORT_NAME
+restart::Перезапустить $SHELL_SHORT_NAME
+status::Проверить состояние $SHELL_SHORT_NAME
 [br]
-Enable Autostart $SHELL_SHORT_NAME
-Disable Autostart $SHELL_SHORT_NAME
+enable::Включить автозапуск $SHELL_SHORT_NAME
+disable::Отключить автозапуск $SHELL_SHORT_NAME
 "
 menu_install_custom="
-${color_magenta}Show_main_menu${style_plain}
+show_main_menu::${color_magenta}Главное меню${style_plain}
 [br]
-Install_custom_$NAME_APP script version  ${color_yellow}(Not recommended)${style_plain}
-Install_custom_script version  ${color_yellow}(Not recommended)${style_plain}
+install_custom_panel::Установить свою версию панели $NAME_APP  ${color_yellow}(не рекомендуется)${style_plain}
+install_custom_script::Установить свою версию скрипта  ${color_yellow}(не рекомендуется)${style_plain}
 "
 menu_update="
-${color_magenta}Show_main_menu${style_plain}
+show_main_menu::${color_magenta}Главное меню${style_plain}
 [br]
-Update_all
-Update_script only
-Update_panel only
+update_all::Обновить всё
+update_script::Обновить только скрипт
+update_panel::Обновить только панель
 "
 menu_settings="
-${color_magenta}Show_main_menu${style_plain}
+show_main_menu::${color_magenta}Главное меню${style_plain}
 [br]
-Backup_management
-Update_geo files
-Speedtest your internet connection
-Edit_settings file manually
-DB_management
-Clear_all_cache files
-Repair $SHELL_SHORT_NAME installation
+backup_management::Управление резервными копиями
+update_geo::Обновить файлы geo
+speedtest::Проверить скорость интернет-соединения
+edit_settings::Редактировать файл настроек вручную
+db_management::Управление базой данных
+clear_all_cache::Очистить весь кэш
+repair::Восстановить установку $SHELL_SHORT_NAME
 "
 menu_db_management="
-${color_magenta}Show_main_menu${style_plain}
+show_main_menu::${color_magenta}Главное меню${style_plain}
 [br]
-Save_db_to_json files
-Restore_db_from_json files ${color_red}(Careful!)${style_plain}
-Delete_all_json files
+save_db_to_json::Сохранить базу данных в json-файлы
+restore_db_from_json::Восстановить базу данных из json-файлов ${color_red}(осторожно!)${style_plain}
+delete_all_json::Удалить все json-файлы
 [br]
-Vacuum Performing on DB
-Integrity_check performing on DB
+vacuum::Выполнить VACUUM базы данных
+integrity_check::Проверить целостность базы данных
 "
 menu_backup_management="
-${color_magenta}Show_main_menu${style_plain}
+show_main_menu::${color_magenta}Главное меню${style_plain}
 [br]
-Backup DB panel settings
-Restore DB panel settings
-Delete_old_backups
+backup::Создать резервную копию базы данных панели
+restore::Восстановить базу данных панели из копии
+delete_old_backups::Удалить старые резервные копии
 "
 menu_archive="
-ZSTD maximum compression, fast ${color_green}(recommended)${style_plain}
-GZIP low compression, fast
-BZIP2 stronger compression, but slower
-XZ maximum compression, takes longer
-CP it means no compression, very fast
+zstd::ZSTD: максимальное сжатие, быстро ${color_green}(рекомендуется)${style_plain}
+gzip::GZIP: слабое сжатие, быстро
+bzip2::BZIP2: сильное сжатие, но медленнее
+xz::XZ: максимальное сжатие, занимает больше времени
+cp::CP: без сжатия, очень быстро
 "
 menu_ssl="
-Ed25519 ${color_green}(*recommended*)${style_plain}
-RSA_2048
-RSA_4096
-ECDSA_prime256v1
-ECDSA_secp384r1
+ed25519::Ed25519 ${color_green}(*рекомендуется*)${style_plain}
+rsa_2048::RSA_2048
+rsa_4096::RSA_4096
+ecdsa_prime256v1::ECDSA_prime256v1
+ecdsa_secp384r1::ECDSA_secp384r1
 "
 menu_update_geo_list="
-Loyalsoldier datasets (geoip.dat, geosite.dat)
-chocolate4u datasets (geoip_IR.dat, geosite_IR.dat)
-runetfreedom datasets (geoip_RU.dat, geosite_RU.dat)
+loyalsoldier::Loyalsoldier: наборы данных (geoip.dat, geosite.dat)
+chocolate4u::chocolate4u: наборы данных (geoip_IR.dat, geosite_IR.dat)
+runetfreedom::runetfreedom: наборы данных (geoip_RU.dat, geosite_RU.dat)
 "
 if check_status 2>/dev/null; [[ ! $? -eq 2 ]]; then
     version_panel
@@ -1603,7 +1648,7 @@ if [[ $# -gt 0 ]]; then
 else
     if [[ -d "$DIR_PROJECT/new" ]]; then
         check_all_ruls && dos2unix "$DIR_REAL_SHELL/$NAME_REAL_SHELL"
-        confirm_options "Do you want to start $SHELL_SHORT_NAME and enable autostart" "y"
+        confirm_options "Запустить $SHELL_SHORT_NAME и включить автозапуск" "y"
         if [[ $? == 0 ]]; then
             start && enable
         fi
@@ -1619,10 +1664,10 @@ ____/ // / \ \       | |__| | | |
 \____/ \/   \/        \____/  |_|
 ${style_plain}
 "
-    echo -e "${color_yellow}${SHELL_SHORT_NAME^^} Script:     ${color_white}${CURRENT_VERSION_SCRIPT}${style_plain}"
+    echo -e "${color_yellow}Скрипт ${SHELL_SHORT_NAME^^}:     ${color_white}${CURRENT_VERSION_SCRIPT}${style_plain}"
 	show_main_menu=$menu_exit
     if [[ -f $DIR_PROJECT/$NAME_APP ]]; then
-        echo -e "${SHELL_SHORT_NAME^^} Panel:      $CURRENT_VERSION_ALL" && show_main_menu+=$menu_extra && echo -e "" && show_status && echo -e ""
+        echo -e "Панель ${SHELL_SHORT_NAME^^}:     $CURRENT_VERSION_ALL" && show_main_menu+=$menu_extra && echo -e "" && show_status && echo -e ""
 	else
         show_main_menu+=$menu_install
     fi
@@ -1677,13 +1722,13 @@ if [[ "$DIR_NOTREAL_CUR" == "$DIR_AUTO_START" ]]; then
                 status
                 ;;
             *)
-                echo -e "  Commands: ${color_green}start${style_plain} | ${color_red}stop${style_plain} | ${color_yellow}restart${style_plain} | status"
+                echo -e "  Команды: ${color_green}start${style_plain} | ${color_red}stop${style_plain} | ${color_yellow}restart${style_plain} | status"
                 ;;
         esac
     logmsg "Auto start script ended" nolog
     exit 1
 else
-    [[ $EUID -ne 0 ]] && logmsg "${color_red}Fatal error: ${style_plain} Please run this script with root privilege \n " && exit 1
+    [[ $EUID -ne 0 ]] && logmsg "${color_red}Критическая ошибка: ${style_plain} Запустите скрипт с правами root \n " && exit 1
     if [[ $# -gt 0 ]]; then
     COMMANDS_CALL=$1 && commands_arg=$2
         if check_status 2>/dev/null; [[ $? -eq 2 ]]; then
@@ -1691,7 +1736,7 @@ else
         elif check_status 2>/dev/null; [[ ! $? -eq 2 ]]; then
             check_install && safe_call_function "$@"
         else
-            logmsg "${color_red}${ICO_MAP[ERR]} First install the panel! ${style_plain}" && bye
+            logmsg "${color_red}${ICO_MAP[ERR]} Сначала установите панель! ${style_plain}" && bye
         fi
     else
         show_main_menu
