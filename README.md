@@ -5,7 +5,7 @@
 Вы запускаете одну команду по SSH, а скрипт сам ставит зависимости, скачивает **последнюю** версию 3x-ui, настраивает панель, включает автозапуск и в конце показывает адрес, логин и пароль.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh | sh
+curl -fsSL https://raw.githubusercontent.com/byDGer/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh | sh
 ```
 
 ---
@@ -22,6 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/mai
 - [Расположение файлов](#расположение-файлов)
 - [Настройка скрипта](#настройка-скрипта)
 - [Частые проблемы](#частые-проблемы)
+- [Содержимое репозитория](#содержимое-репозитория)
 - [Как это устроено](#как-это-устроено)
 - [Благодарности и ответственность](#благодарности-и-ответственность)
 
@@ -32,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/mai
 1. Проверяет, что вы root, что установлен Entware и что роутер на **aarch64**.
 2. Устанавливает через `opkg` нужные пакеты (`curl`, `ca-certificates`, `wget-ssl`, `bash`); остальное доставляет сам менеджер `x-ui.sh`.
 3. Определяет **последний релиз** 3x-ui на GitHub и проверяет, что в нём есть сборка `x-ui-linux-arm64.tar.gz`.
-4. Скачивает управляющий скрипт `x-ui.sh` проекта [x-ui-keenetic](https://gitlab.com/own-open-source/x-ui-keenetic) и запускает установку без интерактивных вопросов.
+4. Скачивает управляющий скрипт `x-ui.sh` из этого же репозитория (он основан на проекте [x-ui-keenetic](https://gitlab.com/own-open-source/x-ui-keenetic)) и запускает установку без интерактивных вопросов.
 5. Вместо стандартных `admin / 12345` задаёт **случайные** логин, пароль и путь к панели.
 6. Включает автозапуск при загрузке роутера, запускает панель и выводит данные для входа.
 
@@ -46,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/mai
 | Установленный **Entware** | В KeeneticOS включён компонент «Поддержка открытых пакетов» (OPKG), на старых моделях нужен USB-накопитель |
 | SSH-доступ к Entware | Обычно `ssh root@192.168.1.1 -p 222` (адрес и порт могут отличаться) |
 | Права root | Входите под `root` в Entware |
-| Интернет на роутере | Нужен доступ к `github.com`, `raw.githubusercontent.com` и `gitlab.com` |
+| Интернет на роутере | Нужен доступ к `github.com` и `raw.githubusercontent.com`. Доступ к `gitlab.com` нужен только для обновления самого управляющего скрипта через `x-ui update` |
 
 ### Роутеры на MIPS не поддерживаются
 
@@ -65,13 +66,13 @@ opkg update && opkg install curl ca-certificates
 **3. Запустите установку:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh | sh
+curl -fsSL https://raw.githubusercontent.com/byDGer/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh | sh
 ```
 
 Если не хотите выполнять скрипт «вслепую», сначала скачайте его, прочитайте и только потом запустите:
 
 ```sh
-curl -fsSL -o install-3xui-keenetic.sh https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh
+curl -fsSL -o install-3xui-keenetic.sh https://raw.githubusercontent.com/byDGer/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh
 less install-3xui-keenetic.sh
 sh install-3xui-keenetic.sh
 ```
@@ -116,7 +117,7 @@ sh install-3xui-keenetic.sh
 - **Не открывайте панель в интернет без необходимости.** По умолчанию она доступна только в локальной сети, и это самый безопасный вариант. Не пробрасывайте порт панели на внешний адрес без HTTPS.
 - Логин, пароль и путь к панели генерируются случайно, а не стандартные `admin / 12345`. Не оставляйте стандартные значения, если будете менять данные вручную.
 - Для доступа извне настройте SSL-сертификат в меню `x-ui` (раздел с сертификатами) и используйте длинный пароль.
-- Команда `curl ... | sh` выполняет скрипт с правами root. Перед запуском вы можете прочитать [`install-3xui-keenetic.sh`](install-3xui-keenetic.sh): он небольшой и содержит комментарии.
+- Команда `curl ... | sh` выполняет скрипт с правами root. Перед запуском вы можете прочитать [`install-3xui-keenetic.sh`](https://github.com/byDGer/3xui-keenetic-aarch64/blob/main/install-3xui-keenetic.sh): он небольшой и содержит комментарии.
 - Управляющий скрипт `x-ui.sh` сторонний (см. [Благодарности](#благодарности-и-ответственность)). Учитывайте это при оценке рисков.
 
 ## Обновление и удаление
@@ -150,12 +151,12 @@ x-ui uninstall
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
-| `XUI_SH_URL` | `https://gitlab.com/own-open-source/x-ui-keenetic/-/raw/main/x-ui.sh` | Откуда брать управляющий скрипт `x-ui.sh` |
+| `XUI_SH_URL` | `https://raw.githubusercontent.com/byDGer/3xui-keenetic-aarch64/main/x-ui.sh` | Откуда брать управляющий скрипт `x-ui.sh` |
 
-Пример со своим источником `x-ui.sh`:
+Пример с другим источником `x-ui.sh` (например, со своим форком):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh | XUI_SH_URL=https://example.com/x-ui.sh sh
+curl -fsSL https://raw.githubusercontent.com/byDGer/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh | XUI_SH_URL=https://example.com/x-ui.sh sh
 ```
 
 Скрипт проверяет, что в таком `x-ui.sh` панель по-прежнему скачивается с `MHSanaei/3x-ui`, иначе останавливается.
@@ -169,19 +170,28 @@ curl -fsSL https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/mai
 | `нужен root` | Войдите под `root` |
 | `curl: (60)` или ошибки сертификата | Установите `ca-certificates`: `opkg install ca-certificates` |
 | `не удалось определить последнюю версию` | Нет доступа к `github.com` или исчерпан лимит запросов. Проверьте интернет на роутере и повторите позже |
-| `в релизе … нет файла x-ui-linux-arm64.tar.gz` | В последнем релизе 3x-ui временно нет такой сборки. Подождите или откройте [issue](../../issues) |
-| `не удалось применить патч «без меню»` | Формат `x-ui.sh` изменился. Откройте [issue](../../issues) с версией скрипта |
+| `в релизе … нет файла x-ui-linux-arm64.tar.gz` | В последнем релизе 3x-ui временно нет такой сборки. Подождите или откройте [issue](https://github.com/byDGer/3xui-keenetic-aarch64/issues) |
+| `не удалось применить патч «без меню»` | Формат `x-ui.sh` изменился. Откройте [issue](https://github.com/byDGer/3xui-keenetic-aarch64/issues) с версией скрипта |
+| `не удалось скачать … x-ui.sh` | Нет доступа к `raw.githubusercontent.com` или изменился адрес файла. Проверьте, что открывается `https://raw.githubusercontent.com/byDGer/3xui-keenetic-aarch64/main/x-ui.sh` |
 | `панель не установилась` | Смотрите журнал: `tail -n 50 /opt/var/log/script_x-ui.log` |
 | Панель не открывается | Проверьте `x-ui status`, адрес и порт, и что вы подключены к локальной сети роутера |
 
 Сообщая о проблеме, приложите вывод скрипта и последние строки `/opt/var/log/script_x-ui.log`. **Пароли из вывода удалите.**
+
+## Содержимое репозитория
+
+| Файл | Назначение |
+|---|---|
+| `install-3xui-keenetic.sh` | Установщик, который запускается командой `curl ... \| sh` |
+| `x-ui.sh` | Управляющий скрипт (меню `x-ui`, запуск, автозапуск, настройка панели). Установщик скачивает его отсюда |
+| `README.md` | Это описание |
 
 ## Как это устроено
 
 Установщик не заменяет существующие проекты, а оборачивает их:
 
 - **Панель** (3x-ui) берётся из релизов `MHSanaei/3x-ui`, сборка `x-ui-linux-arm64.tar.gz`.
-- **Управляющий скрипт** `x-ui.sh` берётся из проекта x-ui-keenetic. Он умеет ставить панель в Entware, регистрировать автозапуск и показывать меню.
+- **Управляющий скрипт** `x-ui.sh` лежит в этом репозитории и основан на проекте x-ui-keenetic. Он умеет ставить панель в Entware, регистрировать автозапуск и показывать меню.
 - **Что добавляет этот скрипт:**
   - проверки окружения и архитектуры;
   - автоматическое определение последней версии;
@@ -193,9 +203,9 @@ curl -fsSL https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/mai
 ## Благодарности и ответственность
 
 - [MHSanaei/3x-ui](https://github.com/MHSanaei/3x-ui): веб-панель.
-- [own-open-source/x-ui-keenetic](https://gitlab.com/own-open-source/x-ui-keenetic): управляющий скрипт для Keenetic.
+- [own-open-source/x-ui-keenetic](https://gitlab.com/own-open-source/x-ui-keenetic): исходный проект управляющего скрипта для Keenetic, на котором основан `x-ui.sh` из этого репозитория.
 - [Xray-core](https://github.com/XTLS/Xray-core): ядро, которым управляет панель.
 
 Этот репозиторий не связан с авторами перечисленных проектов, Keenetic или Entware. Скрипт предоставляется «как есть», без гарантий. Вы сами отвечаете за то, как используете полученные инструменты, в том числе за соблюдение законодательства вашей страны и условий вашего провайдера. Перед установкой делайте резервные копии настроек роутера.
 
-Если скрипт помог, поставьте ⭐ репозиторию. Нашли ошибку или хотите предложить улучшение: создайте [issue](../../issues) или pull request.
+Если скрипт помог, поставьте ⭐ репозиторию. Нашли ошибку или хотите предложить улучшение: создайте [issue](https://github.com/byDGer/3xui-keenetic-aarch64/issues) или pull request.

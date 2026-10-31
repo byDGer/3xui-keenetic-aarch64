@@ -1,18 +1,18 @@
 #!/bin/sh
 # install-3xui-keenetic.sh: автоматическая установка ПОСЛЕДНЕЙ версии 3x-ui на Keenetic
 # (Entware, aarch64). Панель всегда скачивается из github.com/MHSanaei/3x-ui,
-# управляющий скрипт x-ui.sh берётся из x-ui-keenetic (GitLab).
+# управляющий скрипт x-ui.sh берётся из этого же репозитория (byDGer/3xui-keenetic-aarch64).
 #
 # Запуск одной командой (на роутере, по SSH в Entware, от root):
-#   curl -fsSL https://raw.githubusercontent.com/dgerankin/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/byDGer/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh | sh
 # Нужны curl и ca-certificates:  opkg update && opkg install curl ca-certificates
 #
 # Необязательная переменная:
 #   XUI_SH_URL=...   откуда брать управляющий скрипт x-ui.sh
-#                    (по умолчанию GitLab own-open-source/x-ui-keenetic)
+#                    (по умолчанию x-ui.sh из репозитория byDGer/3xui-keenetic-aarch64)
 set -eu
 
-XUI_SH_URL="${XUI_SH_URL:-https://gitlab.com/own-open-source/x-ui-keenetic/-/raw/main/x-ui.sh}"
+XUI_SH_URL="${XUI_SH_URL:-https://raw.githubusercontent.com/byDGer/3xui-keenetic-aarch64/main/x-ui.sh}"
 PANEL_REPO="MHSanaei/3x-ui"
 
 DIR=/opt/etc/x-ui
