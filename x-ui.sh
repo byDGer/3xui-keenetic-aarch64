@@ -13,7 +13,7 @@
 #    bash x-ui.sh                  — при первом запуске предложит выбор: автоматическая установка или самостоятельная настройка;
 #                                    после установки откроет меню управления (то же самое делает команда x-ui)
 #    x-ui <команда>                — выполнить команду без меню, например:
-#                                    start | stop | restart | status | enable | disable | view_panel | ssl | ssl_domain | update
+#                                    start | stop | restart | status | enable | disable | view_panel | ssl | ssl_domain | ssl_remove | update
 #    bash x-ui.sh auto_install     — автоматическая установка без вопросов
 #
 #  Где что лежит:
@@ -698,7 +698,25 @@ auto_install() {
     port=$(echo "$info" | grep -Eo 'port: .+' | awk '{print $2}' | head -n1)
     path=$(echo "$info" | grep -Eo 'webBasePath: .+' | awk '{print $2}' | head -n1)
     ip=$(ifconfig br0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
-    [[ -n "$("$DIR_PROJECT/$NAME_APP" setting -getCert 2>/dev/null)" ]] && scheme="https"
+    # Узнаём, по какому протоколу панель отвечает на самом деле, а не только по настройкам:
+    # сначала пробуем HTTPS (ключ -k: самоподписанный сертификат не проверяем), затем HTTP; ждём запуск до 10 секунд.
+    local answered=0 i
+    if [[ -n "$ip" && -n "$port" ]] && command -v curl >/dev/null 2>&1; then
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -ksS -o /dev/null --max-time 3 "https://${ip}:${port}/" 2>/dev/null; then
+                scheme="https"; answered=1; break
+            elif curl -sS -o /dev/null --max-time 3 "http://${ip}:${port}/" 2>/dev/null; then
+                scheme="http"; answered=1; break
+            fi
+            sleep 1
+        done
+    fi
+    if [[ $answered -eq 0 ]]; then
+        # Проверить не удалось (панель ещё запускается или нет curl): берём протокол из настроек
+        ssl_cert_configured && scheme="https"
+    elif [[ "$scheme" == "http" ]] && ssl_cert_configured; then
+        logmsg "${color_yellow}${ICO_MAP[WAR]} Сертификат настроен, но панель отвечает по HTTP. Подробности: $DIR_LOGFILE${style_plain}"
+    fi
     echo -e "\n###############################################\n"
     logmsg "${color_green}${ICO_MAP[GOOD]} $SHELL_SHORT_NAME установлена и запущена.${style_plain}"
     echo -e "Адрес:  ${color_green}${scheme}://${ip:-<IP роутера>}:${port:-2053}${path}${style_plain}"
@@ -885,10 +903,17 @@ restart() {
     [[ $status == 0 ]] && logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME успешно перезапущен${style_plain}" || logmsg "${color_red}${ICO_MAP[ERR]}Не удалось перезапустить $SHELL_SHORT_NAME, возможно, запуск занимает больше двух секунд. Проверьте журнал позже${style_plain}"
 }
 
+# Настроен ли SSL-сертификат в панели: код 0 — да, 1 — нет.
+# Команда панели «setting -getCert» печатает строки «cert: ...» и «key: ...» даже тогда, когда путей нет,
+# поэтому просто проверять, что вывод не пустой, нельзя: смотрим, что после «cert:» стоит значение.
+ssl_cert_configured() {
+    "$DIR_PROJECT/$NAME_APP" setting -getCert 2>/dev/null | grep -Eq 'cert: .+'
+}
+
 # Показывает, настроен ли SSL-сертификат панели, и по желанию задаёт пути к файлу сертификата и ключа.
 ssl_check(){
 	local certs=$($DIR_PROJECT/$NAME_APP setting -getCert)
-	if [[ -z "$certs" ]]; then
+	if ! ssl_cert_configured; then
 		logmsg "${color_yellow}SSL-сертификат сейчас не настроен!${style_plain}"
 	else
 		logmsg "${color_green}SSL-сертификат настроен:${style_plain}"
@@ -1249,11 +1274,16 @@ ssl() {
     fi
 }
 
-# Создаёт самоподписанный сертификат на 10 лет и кладёт файлы в /opt/etc/x-ui/cert (webCert.pem и webCertKey.pem).
-# Параметры: 1 — тип ключа для openssl (ed25519, rsa:2048 и т. д.), 2 — имя в сертификате (IP-адрес или домен).
-# Имя дублируется в поле subjectAltName: современные браузеры проверяют именно его.
+# Создаёт самоподписанный сертификат и кладёт файлы в /opt/etc/x-ui/cert (webCert.pem и webCertKey.pem).
+# Параметры: 1 — тип ключа для openssl (по умолчанию rsa:4096; также rsa:2048, ec ..., ed25519), 2 — имя в сертификате (IP-адрес или домен).
+# Что сделано для совместимости с браузерами:
+#   • RSA вместо Ed25519 (многие браузеры не принимают сертификаты с ключом Ed25519);
+#   • имя дублируется в subjectAltName (современные браузеры проверяют именно его, а не CN);
+#   • сертификат помечен как конечный серверный (CA:FALSE, serverAuth);
+#   • срок 825 дней: это максимум, который принимают iOS и macOS.
+# Если установленный openssl не знает ключ -addext, пробуем с меньшим набором расширений.
 ssl_make_self_signed() {
-    local key_opt="${1:-ed25519}"
+    local key_opt="${1:-rsa:4096}"
     local cn="$2"
     local san
     mkdir -p "$DIR_CERT"
@@ -1262,10 +1292,14 @@ ssl_make_self_signed() {
     else
         san="DNS:$cn"
     fi
-    openssl req -x509 -nodes -days 3650 -newkey $key_opt \
+    openssl req -x509 -nodes -sha256 -days 825 -newkey $key_opt \
+        -keyout "$DIR_CERT/webCertKey.pem" -out "$DIR_CERT/webCert.pem" -subj "/CN=$cn" \
+        -addext "subjectAltName=$san" -addext "basicConstraints=critical,CA:FALSE" \
+        -addext "keyUsage=critical,digitalSignature,keyEncipherment" -addext "extendedKeyUsage=serverAuth" 2>/dev/null \
+    || openssl req -x509 -nodes -sha256 -days 825 -newkey $key_opt \
         -keyout "$DIR_CERT/webCertKey.pem" -out "$DIR_CERT/webCert.pem" \
         -subj "/CN=$cn" -addext "subjectAltName=$san" 2>/dev/null \
-    || openssl req -x509 -nodes -days 3650 -newkey $key_opt \
+    || openssl req -x509 -nodes -sha256 -days 825 -newkey $key_opt \
         -keyout "$DIR_CERT/webCertKey.pem" -out "$DIR_CERT/webCert.pem" \
         -subj "/CN=$cn" 2>/dev/null
     local rc=$?
@@ -1273,13 +1307,13 @@ ssl_make_self_signed() {
     return $rc
 }
 
-# Включает HTTPS для панели самоподписанным сертификатом, если сертификат ещё не задан.
+# Включает HTTPS для панели самоподписанным сертификатом RSA 4096, если сертификат ещё не задан.
 # Вызывается при первой установке до запуска панели. В обычном режиме спрашивает подтверждение (по умолчанию — да),
 # в автоматическом создаёт сертификат без вопросов. Имя в сертификате — IP-адрес роутера в локальной сети.
+# После применения проверяет, что панель действительно приняла сертификат.
 ssl_enable_self_signed() {
-    local certs
-    certs=$("$DIR_PROJECT/$NAME_APP" setting -getCert)
-    if [[ -n "$certs" ]]; then
+    # Сертификат уже настроен (например, пользователь задал свой) — ничего не трогаем
+    if ssl_cert_configured; then
         return 0
     fi
     confirm_options "Создать самоподписанный сертификат и включить HTTPS для панели (рекомендуется)" "y"
@@ -1287,14 +1321,20 @@ ssl_enable_self_signed() {
         logmsg "${color_yellow}${ICO_MAP[WAR]} HTTPS не включён: панель будет работать по HTTP.${style_plain}"
         return 0
     fi
+    # Имя в сертификате — IP-адрес роутера в локальной сети (интерфейс br0)
     local ip cn
     ip=$(ifconfig br0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
     cn="${ip:-$(hostname 2>/dev/null)}"
     cn="${cn:-$SHELL_SHORT_NAME}"
-    logmsg "${color_green}${ICO_MAP[WORK]} Создание самоподписанного сертификата для $cn...${style_plain}"
-    if ssl_make_self_signed ed25519 "$cn"; then
+    logmsg "${color_green}${ICO_MAP[WORK]} Создание самоподписанного сертификата RSA 4096 для $cn (на роутере это может занять до минуты)...${style_plain}"
+    if ssl_make_self_signed rsa:4096 "$cn"; then
+        # Сообщаем панели пути к сертификату и ключу
         "$DIR_PROJECT/$NAME_APP" cert -webCert "$DIR_CERT/webCert.pem" -webCertKey "$DIR_CERT/webCertKey.pem"
-        logmsg "${color_green}${ICO_MAP[INF]} HTTPS включён (самоподписанный сертификат: $DIR_CERT/webCert.pem).${style_plain}"
+        if ssl_cert_configured; then
+            logmsg "${color_green}${ICO_MAP[INF]} HTTPS включён (самоподписанный сертификат: $DIR_CERT/webCert.pem).${style_plain}"
+        else
+            logmsg "${color_red}${ICO_MAP[ERR]} Панель не приняла сертификат: она будет работать по HTTP. Попробуйте задать его в меню (пункт про самоподписанный сертификат).${style_plain}"
+        fi
     else
         logmsg "${color_red}${ICO_MAP[ERR]} Не удалось создать сертификат: панель будет работать по HTTP. Повторить можно в меню (пункт про самоподписанный сертификат).${style_plain}"
     fi
@@ -1457,6 +1497,51 @@ ssl_domain() {
     fi
 }
 
+# Пункт меню: удалить SSL-сертификат из настроек панели, чтобы она снова работала по HTTP.
+# Порядок действий: штатный сброс (cert -reset) → пустые пути → правка базы данных (запасной вариант).
+# Файлы самоподписанного сертификата можно удалить тоже. Сертификаты, полученные для домена (cert/<домен>/), не затрагиваются.
+ssl_remove() {
+    local bin="$DIR_PROJECT/$NAME_APP"
+    # Если сертификата в панели нет — делать нечего
+    if ! ssl_cert_configured; then
+        logmsg "${color_yellow}${ICO_MAP[WAR]} SSL-сертификат в панели не настроен: она уже работает по HTTP.${style_plain}"
+        return 0
+    fi
+    logmsg "${color_yellow}Сейчас в панели настроен сертификат:${style_plain}"
+    "$bin" setting -getCert
+    confirm_options "Удалить SSL-сертификат из панели и вернуться к HTTP" "n" "" "$color_red"
+    if [[ $? != 0 ]]; then
+        return 0
+    fi
+    # 1. Штатный сброс сертификата
+    "$bin" cert -reset >/dev/null 2>&1
+    # 2. Если не помогло — задаём пустые пути к сертификату и ключу
+    if ssl_cert_configured; then
+        "$bin" cert -webCert "" -webCertKey "" >/dev/null 2>&1
+    fi
+    # 3. Запасной вариант: очищаем значения прямо в базе данных панели
+    if ssl_cert_configured && [[ -f "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        sqlite3 "$DB" "UPDATE settings SET value='' WHERE key IN ('webCertFile','webKeyFile');" 2>/dev/null
+    fi
+    if ssl_cert_configured; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось убрать сертификат автоматически. Очистите пути к сертификату в самой панели (Настройки панели → Сертификат).${style_plain}"
+        return 1
+    fi
+    logmsg "${color_green}${ICO_MAP[INF]} SSL-сертификат удалён из настроек панели: после перезапуска она будет работать по HTTP.${style_plain}"
+    # Файлы самоподписанного сертификата больше не нужны — предлагаем удалить
+    if [[ -f "$DIR_CERT/webCert.pem" || -f "$DIR_CERT/webCertKey.pem" ]]; then
+        confirm_options "Удалить также файлы самоподписанного сертификата (webCert.pem, webCertKey.pem)" "y"
+        if [[ $? == 0 ]]; then
+            rm -f "$DIR_CERT/webCert.pem" "$DIR_CERT/webCertKey.pem"
+            logmsg "${color_green}${ICO_MAP[INF]} Файлы сертификата удалены.${style_plain}"
+        fi
+    fi
+    echo -e "Сертификаты, полученные для вашего домена (каталог cert/<домен>), и их автопродление не затрагиваются."
+    # Перезапуск нужен, чтобы панель перешла на HTTP
+    confirm_restart
+    view_panel
+}
+
 # Работает ли панель: ищет запущенный процесс xui. Код 0 — работает.
 check_panel() {
     pgrep -f $NAME_APP > /dev/null
@@ -1496,8 +1581,8 @@ local cache=$2
 menu_numeric_choice_list=""
 # menu_key_list хранит строки «номер:ключ». По нему потом определяется функция выбранного пункта.
 menu_key_list=""
-if [[ -d "$DIR_CACHE/menu" && ! -f "$DIR_CACHE/.menu_v$CURRENT_VERSION_SCRIPT" ]]; then
-    rm -rf "$DIR_CACHE/menu"
+if [[ -d "$DIR_CACHE/menu" && ! -f "$DIR_CACHE/.menu_$MENU_HASH" ]]; then
+    rm -rf "$DIR_CACHE/menu" "$DIR_CACHE"/.menu_*
 fi
 if [[ -z "$2" ]]; then
     local menu="${!name_menu}"
@@ -1536,11 +1621,11 @@ else
         fi
     done
     menu_numeric_choice_list+="$menu_numeric_choice_br_list"
-    # Сохраняем собранное меню в кэш, чтобы в следующий раз не собирать заново. Кэш привязан к версии скрипта.
+    # Сохраняем собранное меню в кэш, чтобы в следующий раз не собирать заново. Кэш привязан к тексту меню (MENU_HASH): после любого изменения меню он обновляется сам.
     if [[ -z $cache && -z $no_cache_needed ]]; then
         if [[ ! -d "$DIR_CACHE/menu" ]]; then
             mkdir -p "$DIR_CACHE/menu"
-            touch "$DIR_CACHE/.menu_v$CURRENT_VERSION_SCRIPT"
+            touch "$DIR_CACHE/.menu_$MENU_HASH"
         fi
         echo -e "menu_numeric_choice_list=\"$menu_numeric_choice_list\"" >> "$DIR_CACHE/menu/$name_menu"
         echo -e "start_index=\"$start_index\"" >> "$DIR_CACHE/menu/$name_menu"
@@ -2066,6 +2151,7 @@ view_panel::Показать настройки панели
 [br]
 ssl::Создать самоподписанный SSL-сертификат
 ssl_domain::Получить SSL-сертификат для своего домена (Let's Encrypt)
+ssl_remove::Удалить SSL-сертификат (вернуться к HTTP)
 [br]
 start::Запустить $SHELL_SHORT_NAME
 stop::Остановить $SHELL_SHORT_NAME
@@ -2131,11 +2217,11 @@ cp::CP: без сжатия, очень быстро
 "
 # Типы ключей для самоподписанного сертификата.
 menu_ssl="
-ed25519::Ed25519 ${color_green}(*рекомендуется*)${style_plain}
+rsa_4096::RSA_4096 ${color_green}(рекомендуется, принимают все браузеры)${style_plain}
 rsa_2048::RSA_2048
-rsa_4096::RSA_4096
 ecdsa_prime256v1::ECDSA_prime256v1
 ecdsa_secp384r1::ECDSA_secp384r1
+ed25519::Ed25519 ${color_yellow}(многие браузеры не принимают)${style_plain}
 "
 # Наборы geo-файлов для обновления.
 menu_update_geo_list="
@@ -2148,6 +2234,9 @@ menu_start="
 auto_install::Автоматическая установка ${color_green}(последняя версия, HTTPS, случайный пароль, автозапуск)${style_plain}
 manual::Самостоятельная настройка (каждый пункт настраиваете сами)
 "
+# Отпечаток текстов всех меню. Если меню изменилось (даже при той же версии скрипта), старый кэш меню сбрасывается сам.
+MENU_HASH=$(printf '%s' "$menu_exit$menu_install$menu_extra$menu_install_custom$menu_update$menu_settings$menu_db_management$menu_backup_management$menu_archive$menu_ssl$menu_update_geo_list$menu_start" | { cksum 2>/dev/null || md5sum 2>/dev/null; } | cut -d' ' -f1)
+MENU_HASH="${MENU_HASH:-$CURRENT_VERSION_SCRIPT}"
 if check_status 2>/dev/null; [[ ! $? -eq 2 ]]; then
     version_panel
 fi
