@@ -15,6 +15,10 @@
 #   curl -fsSL https://raw.githubusercontent.com/byDGer/3xui-keenetic-aarch64/main/install-3xui-keenetic.sh | sh -s -- auto
 # Если терминала нет (например, запуск из планировщика), автоматическая установка включается сама.
 #
+# Если 3x-ui уже установлена, установщик ничего не переустанавливает, а восстанавливает скрипт управления:
+# заменяет /opt/etc/x-ui/x-ui.sh версией из репозитория, пересоздаёт команду /opt/bin/x-ui и запускает панель,
+# если она не работает. Это лечит ошибку «/bin/bash: bad interpreter» после обновления панели в старых версиях.
+#
 # Необязательная переменная:
 #   XUI_SH_URL=...   откуда брать x-ui.sh (по умолчанию из репозитория byDGer/3xui-keenetic-aarch64)
 set -eu
@@ -40,7 +44,6 @@ main() {
     aarch64|arm64) ;;
     *) die "архитектура $(uname -m): скрипт рассчитан на aarch64 (у 3x-ui нет сборок под MIPS)" ;;
   esac
-  [ ! -x "$DIR/xui" ] || die "3x-ui уже установлена. Для управления и обновления запустите: x-ui"
   export PATH=/opt/sbin:/opt/bin:$PATH   # x-ui.sh требует, чтобы opkg был именно /opt/bin/opkg
 
   # --- 2. Пакеты, нужные для запуска x-ui.sh (остальное x-ui.sh доустановит сам) ---
@@ -62,6 +65,20 @@ main() {
   # В скрипте должен быть режим автоматической установки
   grep -q '^auto_install()' x-ui.sh || die "в скачанном x-ui.sh нет режима auto_install (нужна версия 1.0.3 или новее)"
 
+  # --- 3a. Панель уже установлена: восстанавливаем скрипт управления и запускаем панель ---
+  if [ -x "$DIR/xui" ]; then
+    echo "==> 3x-ui уже установлена: восстанавливаю скрипт управления"
+    cp x-ui.sh "$DIR/x-ui.sh"            # родной скрипт 3x-ui (с /bin/bash) мог затереть наш — возвращаем наш
+    chmod 755 "$DIR/x-ui.sh"
+    ln -sf "$DIR/x-ui.sh" /opt/bin/x-ui   # команда x-ui
+    rm -f "$WORK/x-ui.sh"
+    bash "$DIR/x-ui.sh" start || true     # если панель уже работает, скрипт просто сообщит об этом
+    echo
+    echo "Готово. Меню управления: /opt/bin/x-ui"
+    echo "Если команда x-ui «не найдена», выполните: export PATH=/opt/sbin:/opt/bin:\$PATH"
+    return 0
+  fi
+
   # --- 4. Запуск x-ui.sh ---
   rc=0
   if [ "${1:-}" = "auto" ]; then
@@ -79,6 +96,9 @@ main() {
   fi
   rm -f "$WORK/x-ui.sh"   # если скрипт не перенёс себя в /opt/etc/x-ui, убираем временный файл
   [ "$rc" -eq 0 ] || die "установка завершилась с ошибкой (код $rc). Журнал: /opt/var/log/script_x-ui.log"
+  if [ -x "$DIR/xui" ]; then
+    echo "Меню управления: /opt/bin/x-ui   (если команда x-ui «не найдена»: export PATH=/opt/sbin:/opt/bin:\$PATH)"
+  fi
 }
 
 main "$@"

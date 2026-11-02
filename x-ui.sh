@@ -539,8 +539,10 @@ install() {
         if [[ $ARCHITECTURE == "armv5" || $ARCHITECTURE == "armv6" || $ARCHITECTURE == "armv7" ]]; then
             mv bin/xray-linux-$ARCHITECTURE bin/xray-linux-arm
         fi
-		# Файл службы systemd на Entware не нужен.
-		rm -rf $DIR_TMP/$SHELL_SHORT_NAME/x-ui.service 2>/dev/null
+		# Файлы служб (systemd, OpenRC) на Entware не нужны.
+		# ВАЖНО: x-ui.sh из архива панели — родной скрипт автора 3x-ui с интерпретатором /bin/bash (на Entware его нет).
+		# Если его скопировать, он затрёт наш скрипт управления, и после обновления команда x-ui перестанет запускаться.
+		rm -rf $DIR_TMP/$SHELL_SHORT_NAME/x-ui.service* $DIR_TMP/$SHELL_SHORT_NAME/x-ui.rc $DIR_TMP/$SHELL_SHORT_NAME/x-ui.sh 2>/dev/null
         chmod -R 755 $SHELL_SHORT_NAME/$NAME_APP
         # Копируем панель в рабочий каталог /opt/etc/x-ui.
         cp -rf $DIR_TMP/$SHELL_SHORT_NAME $DIR_MAIN
@@ -596,7 +598,7 @@ install() {
     rm $SHELL_SHORT_NAME-"$1".tar.gz -f
     permissions
     logmsg "${ICO_MAP[GOOD]} ${style_reverse}$1: версия ${LAST_VERSION_PANEL} успешно установлена!${style_plain}"
-    logmsg "${style_reverse}Для запуска скрипта введите: $SHELL_SHORT_NAME${style_plain}"
+    logmsg "${style_reverse}Для запуска скрипта введите: $DIR_INSTALL_LNK${style_plain}"
     # Ставим метку «только что установлено»: главное меню по ней предложит запустить панель и включить автозапуск.
     it_was_updated=1 && mkdir -p "$DIR_PROJECT/new"
     # Третий параметр не задан — ждём Enter и возвращаемся в меню (в автоустановке параметр задан, меню не нужно).
@@ -713,8 +715,8 @@ auto_install() {
     fi
     if [[ $answered -eq 0 ]]; then
         # Проверить не удалось (панель ещё запускается или нет curl): берём протокол из настроек
-        ssl_cert_configured && scheme="https"
-    elif [[ "$scheme" == "http" ]] && ssl_cert_configured; then
+        ssl_cert_files_ok && scheme="https"
+    elif [[ "$scheme" == "http" ]] && ssl_cert_files_ok; then
         logmsg "${color_yellow}${ICO_MAP[WAR]} Сертификат настроен, но панель отвечает по HTTP. Подробности: $DIR_LOGFILE${style_plain}"
     fi
     echo -e "\n###############################################\n"
@@ -725,7 +727,8 @@ auto_install() {
     if [[ "$scheme" == "https" ]]; then
         echo -e "\nБраузер предупредит о самоподписанном сертификате: это нормально, продолжите открытие страницы."
     fi
-    echo -e "Сохраните данные: повторно они не показываются. Меню управления: ${color_yellow}$SHELL_SHORT_NAME${style_plain}"
+    echo -e "Сохраните данные: повторно они не показываются. Меню управления: ${color_yellow}$DIR_INSTALL_LNK${style_plain}"
+    echo -e "Если команда $SHELL_SHORT_NAME «не найдена», выполните: export PATH=$DIR_ENTWARE/sbin:$DIR_ENTWARE/bin:\$PATH"
     echo -e "\n###############################################\n"
 }
 # END INSTALLATION ------------------------------------------------------------
@@ -910,7 +913,30 @@ ssl_cert_configured() {
     "$DIR_PROJECT/$NAME_APP" setting -getCert 2>/dev/null | grep -Eq 'cert: .+'
 }
 
-# Показывает, настроен ли SSL-сертификат панели, и по желанию задаёт пути к файлу сертификата и ключа.
+# Работает ли SSL-сертификат на самом деле: пути заданы в панели И файлы сертификата и ключа существуют. Код 0 — да.
+# Это важно: если пути заданы, а файлов нет, панель молча запускается по HTTP, хотя в настройках «сертификат есть».
+ssl_cert_files_ok() {
+    local info c k
+    info=$("$DIR_PROJECT/$NAME_APP" setting -getCert 2>/dev/null)
+    c=$(echo "$info" | grep -Eo 'cert: .+' | awk '{print $2}' | head -n1)
+    k=$(echo "$info" | grep -Eo 'key: .+' | awk '{print $2}' | head -n1)
+    [[ -n "$c" && -n "$k" && -f "$c" && -f "$k" ]]
+}
+
+# Создаёт самоподписанный сертификат RSA 4096 для IP-адреса роутера в локальной сети (интерфейс br0)
+# по стандартным путям $DIR_CERT/webCert.pem и webCertKey.pem. Код возврата — как у ssl_make_self_signed.
+ssl_make_lan_self_signed() {
+    local ip cn
+    ip=$(ifconfig br0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+    cn="${ip:-$(hostname 2>/dev/null)}"
+    cn="${cn:-$SHELL_SHORT_NAME}"
+    logmsg "${color_green}${ICO_MAP[WORK]} Создание самоподписанного сертификата RSA 4096 для $cn (на роутере это может занять до минуты)...${style_plain}"
+    ssl_make_self_signed rsa:4096 "$cn"
+}
+
+# Показывает, настроен ли SSL-сертификат панели, и по желанию задаёт его.
+# Если файлов сертификата по указанным путям нет, для стандартных путей предлагает создать самоподписанный сертификат,
+# а для чужих путей отказывается их прописывать (иначе панель молча работала бы по HTTP).
 ssl_check(){
 	local certs=$($DIR_PROJECT/$NAME_APP setting -getCert)
 	if ! ssl_cert_configured; then
@@ -932,11 +958,36 @@ ssl_check(){
 		fi
 		confirm_options "Путь к публичному сертификату панели (webCert)" "$DIR_CERT/webCert.pem" "config_webCert" $color_cyan
 		confirm_options "Путь к приватному ключу панели (webCertKey)" "$DIR_CERT/webCertKey.pem" "config_webCertKey" $color_cyan
+		# Проверяем, что файлы существуют: панель не должна получить пути к несуществующим сертификатам
+		local sc="${map_confirm[config_webCert]}" sk="${map_confirm[config_webCertKey]}"
+		if [[ ! -f "$sc" || ! -f "$sk" ]]; then
+			if [[ "$sc" == "$DIR_CERT/webCert.pem" && "$sk" == "$DIR_CERT/webCertKey.pem" ]]; then
+				# Стандартные пути, но файлов ещё нет — предлагаем создать самоподписанный сертификат
+				logmsg "${color_yellow}${ICO_MAP[WAR]} Файлов сертификата по этим путям пока нет.${style_plain}"
+				confirm_options "Создать самоподписанный сертификат RSA 4096 по этим путям" "y"
+				if [[ $? != 0 ]]; then
+					logmsg "${color_yellow}${ICO_MAP[WAR]} Сертификат не задан: без файлов HTTPS не заработает.${style_plain}"
+					return 1
+				fi
+				if ! ssl_make_lan_self_signed; then
+					logmsg "${color_red}${ICO_MAP[ERR]} Не удалось создать сертификат.${style_plain}"
+					return 1
+				fi
+			else
+				# Свои пути: сами файлы мы создать не можем — просто сообщаем об ошибке
+				logmsg "${color_red}${ICO_MAP[ERR]} Файл сертификата или ключа не найден: $sc, $sk. Сертификат не задан.${style_plain}"
+				return 1
+			fi
+		fi
 		local params=""
 		[ -z "${map_confirm[config_webCert]}" ] || params="$params -webCert ${map_confirm[config_webCert]}"
 		[ -z "${map_confirm[config_webCertKey]}" ] || params="$params -webCertKey ${map_confirm[config_webCertKey]}"
 		logmsg "${color_yellow}Инициализация, подождите...${style_plain}"
 		$DIR_PROJECT/$NAME_APP cert ${params}
+		if ! ssl_cert_files_ok; then
+			logmsg "${color_red}${ICO_MAP[ERR]} Панель не приняла сертификат: HTTPS не включён.${style_plain}"
+			return 1
+		fi
 		echo -e "" && logmsg "${color_green}Инициализация завершена!${style_plain}"	
 		return 0
 	fi
@@ -987,7 +1038,7 @@ view_panel() {
     local existing_port=$(echo "$info" | grep -Eo 'port: .+' | awk '{print $2}')
     local existing_cert=$(echo "$existing_cert_path" | grep -Eo 'cert: .+' | awk '{print $2}')
     local scheme="http"
-    [[ -n "$existing_cert" ]] && scheme="https"
+    ssl_cert_files_ok && scheme="https"
     # Внешний IP роутера узнаём у сервиса ipify (запасной — ident.me).
     local server_ip=$(curl -s --max-time 3 https://api.ipify.org)
     if [ -z "$server_ip" ]; then
@@ -997,7 +1048,11 @@ view_panel() {
 	echo -e "IP-адрес прослушивания панели: $existing_ip\n"
 	echo -e "$info\n"
 	echo -e "$existing_cert_path\n"
-    if [[ -n "$existing_cert" ]]; then
+    # Пути заданы, но файлов нет: панель в этом случае работает по HTTP
+    if [[ -n "$existing_cert" && "$scheme" == "http" ]]; then
+        logmsg "${color_red}${ICO_MAP[WAR]} Сертификат указан, но его файлов нет: панель работает по HTTP. Создайте сертификат (пункт 12) или уберите настройку (пункт 14).${style_plain}"
+    fi
+    if [[ "$scheme" == "https" ]]; then
         # Если сертификат лежит в каталоге с именем домена (cert/<домен>/), покажем адрес по домену.
         local domain=$(basename "$(dirname "$existing_cert")")
 
@@ -1307,30 +1362,28 @@ ssl_make_self_signed() {
     return $rc
 }
 
-# Включает HTTPS для панели самоподписанным сертификатом RSA 4096, если сертификат ещё не задан.
+# Включает HTTPS для панели самоподписанным сертификатом RSA 4096, если рабочего сертификата ещё нет.
+# «Рабочий» — это когда пути заданы в панели И файлы по этим путям существуют. Если пути заданы, а файлов нет
+# (панель в этом случае молча работает по HTTP), сертификат создаётся заново.
 # Вызывается при первой установке до запуска панели. В обычном режиме спрашивает подтверждение (по умолчанию — да),
 # в автоматическом создаёт сертификат без вопросов. Имя в сертификате — IP-адрес роутера в локальной сети.
-# После применения проверяет, что панель действительно приняла сертификат.
 ssl_enable_self_signed() {
-    # Сертификат уже настроен (например, пользователь задал свой) — ничего не трогаем
-    if ssl_cert_configured; then
+    # Рабочий сертификат уже есть (например, его создали при настройке панели) — ничего не трогаем
+    if ssl_cert_files_ok; then
         return 0
+    fi
+    if ssl_cert_configured; then
+        logmsg "${color_yellow}${ICO_MAP[WAR]} В панели указан сертификат, но файлов по этим путям нет: без них HTTPS не работает.${style_plain}"
     fi
     confirm_options "Создать самоподписанный сертификат и включить HTTPS для панели (рекомендуется)" "y"
     if [[ $? != 0 ]]; then
         logmsg "${color_yellow}${ICO_MAP[WAR]} HTTPS не включён: панель будет работать по HTTP.${style_plain}"
         return 0
     fi
-    # Имя в сертификате — IP-адрес роутера в локальной сети (интерфейс br0)
-    local ip cn
-    ip=$(ifconfig br0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
-    cn="${ip:-$(hostname 2>/dev/null)}"
-    cn="${cn:-$SHELL_SHORT_NAME}"
-    logmsg "${color_green}${ICO_MAP[WORK]} Создание самоподписанного сертификата RSA 4096 для $cn (на роутере это может занять до минуты)...${style_plain}"
-    if ssl_make_self_signed rsa:4096 "$cn"; then
-        # Сообщаем панели пути к сертификату и ключу
+    if ssl_make_lan_self_signed; then
+        # Сообщаем панели пути к сертификату и ключу и проверяем, что она их приняла
         "$DIR_PROJECT/$NAME_APP" cert -webCert "$DIR_CERT/webCert.pem" -webCertKey "$DIR_CERT/webCertKey.pem"
-        if ssl_cert_configured; then
+        if ssl_cert_files_ok; then
             logmsg "${color_green}${ICO_MAP[INF]} HTTPS включён (самоподписанный сертификат: $DIR_CERT/webCert.pem).${style_plain}"
         else
             logmsg "${color_red}${ICO_MAP[ERR]} Панель не приняла сертификат: она будет работать по HTTP. Попробуйте задать его в меню (пункт про самоподписанный сертификат).${style_plain}"
