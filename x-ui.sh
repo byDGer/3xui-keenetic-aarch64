@@ -7,7 +7,8 @@
 #    • включает HTTPS (самоподписанный сертификат) и умеет получать сертификат Let's Encrypt для вашего домена;
 #    • запускает/останавливает панель, включает автозапуск, меняет логин, пароль, порт;
 #    • делает резервные копии базы данных, выгружает её в json, обновляет geo-файлы;
-#    • показывает версию Xray, стоящую в панели, и умеет обновлять только ядро Xray (XTLS/Xray-core);
+#    • показывает версии скрипта, панели и Xray с цветными точками: зелёная — самая свежая версия, жёлтая — есть обновление,
+#      красная — проверить не удалось; умеет обновлять только ядро Xray (XTLS/Xray-core);
 #    • обновляет сам себя из репозитория SCRIPT_REPO (см. CURRENT_VERSION_SCRIPT).
 #
 #  Как запускать (на роутере, в Entware, от root):
@@ -53,7 +54,7 @@ color_bgreen='\033[1;32m'
 declare -A ICO_MAP=( [GOOD]="[ ✔ ]" [BAD]="[ ✘ ]" [WORK]="[ ⚙ ]" [INF]="[INF]" [ERR]="[ERR]" [WAR]="[⚠️]" )
 
 # Версия этого скрипта. При выпуске обновления её нужно увеличить: по ней скрипт понимает, что на GitHub есть новая версия.
-CURRENT_VERSION_SCRIPT="1.0.4"
+CURRENT_VERSION_SCRIPT="1.0.5"
 # Репозиторий, из которого скрипт обновляет сам себя (ветка main).
 SCRIPT_REPO="byDGer/3xui-keenetic-aarch64"
 SCRIPT_RAW="https://raw.githubusercontent.com/$SCRIPT_REPO"
@@ -375,11 +376,12 @@ xray_version() {
     echo "$v"
 }
 
-# Печатает строку «Версия XRay:  x.x.x» для шапки главного меню. Всегда возвращает 0, чтобы не обрывать цепочку команд в show_main_menu.
+# Печатает строку «Версия XRay:  x.x.x ●» для шапки главного меню (точка — статус версии, см. version_dot).
+# Всегда возвращает 0, чтобы не обрывать цепочку команд в show_main_menu.
 show_xray_version() {
     local v
     v=$(xray_version)
-    echo -e "Версия XRay:     ${v:-не определена}"
+    echo -e "Версия XRay:     ${v:-не определена} $(version_dot "$v" "$LATEST_XRAY")"
     return 0
 }
 
@@ -387,9 +389,9 @@ show_xray_version() {
 # Сначала берётся из переадресации страницы «releases/latest» (не зависит от лимитов API), запасной способ — GitHub API.
 xray_last_version() {
     local tag
-    tag=$(curl -4 -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/XTLS/Xray-core/releases/latest" 2>/dev/null | sed -n 's|.*/releases/tag/\(.*\)|\1|p')
+    tag=$(curl -4 -fsSL --max-time 8 -o /dev/null -w '%{url_effective}' "https://github.com/XTLS/Xray-core/releases/latest" 2>/dev/null | sed -n 's|.*/releases/tag/\(.*\)|\1|p')
     if [[ -z "$tag" ]]; then
-        tag=$(curl -4 -fsSL "https://api.github.com/repos/XTLS/Xray-core/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+        tag=$(curl -4 -fsSL --max-time 8 "https://api.github.com/repos/XTLS/Xray-core/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
     fi
     echo "$tag"
 }
@@ -2466,6 +2468,104 @@ if check_status 2>/dev/null; [[ ! $? -eq 2 ]]; then
     version_panel
 fi
 
+# Последняя версия самого скрипта: берётся из строки CURRENT_VERSION_SCRIPT в x-ui.sh в ветке main репозитория SCRIPT_REPO.
+# Печатает номер (например, 1.0.5) или ничего, если проверить не удалось.
+script_last_version() {
+    curl -4 -fsSL --max-time 6 "$SCRIPT_RAW/main/$SHELL_FULL_NAME" 2>/dev/null | grep -m1 '^CURRENT_VERSION_SCRIPT=' | cut -d'"' -f2
+}
+
+# Последняя версия панели 3x-ui на GitHub (MHSanaei/3x-ui), например v3.12.0.
+# Сначала по переадресации страницы «releases/latest» (не зависит от лимитов API), запасной способ — GitHub API.
+panel_last_version() {
+    local tag
+    tag=$(curl -4 -fsSL --max-time 6 -o /dev/null -w '%{url_effective}' "https://github.com/MHSanaei/3x-ui/releases/latest" 2>/dev/null | sed -n 's|.*/releases/tag/\(.*\)|\1|p')
+    if [[ -z "$tag" ]]; then
+        tag=$(curl -4 -fsSL --max-time 6 "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
+    echo "$tag"
+}
+
+# Сравнивает два номера версии по числам (1.0.10 больше 1.0.9). Печатает 1, если первая версия новее, -1, если старее, 0, если равны.
+# Буквы и приставка v игнорируются: берутся только цифры каждой части номера.
+version_cmp() {
+    local a b i x y n
+    IFS=. read -ra a <<< "${1#v}"
+    IFS=. read -ra b <<< "${2#v}"
+    n=${#a[@]}
+    (( ${#b[@]} > n )) && n=${#b[@]}
+    for ((i = 0; i < n; i++)); do
+        x=${a[i]//[^0-9]/}
+        y=${b[i]//[^0-9]/}
+        x=${x:-0}
+        y=${y:-0}
+        if ((10#$x > 10#$y)); then echo 1; return; fi
+        if ((10#$x < 10#$y)); then echo -1; return; fi
+    done
+    echo 0
+}
+
+# Цветная точка статуса версии. Параметры: 1 — установленная версия, 2 — последняя версия на GitHub.
+#   зелёная ● — стоит самая свежая версия;
+#   жёлтая  ● — доступно обновление;
+#   красная ● — проверить не удалось (нет интернета, GitHub не отвечает или версия не определена).
+version_dot() {
+    local cur="$1" last="$2"
+    if [[ -z "$cur" || -z "$last" ]]; then
+        echo -e "${color_red}●${style_plain}"
+    elif [[ "$(version_cmp "$cur" "$last")" == "-1" ]]; then
+        echo -e "${color_yellow}●${style_plain}"
+    else
+        echo -e "${color_green}●${style_plain}"
+    fi
+}
+
+# Узнаёт последние версии скрипта, панели и Xray на GitHub и сохраняет их в кэш (LATEST_SCRIPT, LATEST_PANEL, LATEST_XRAY).
+# Три запроса идут одновременно, у каждого ограничено время ожидания, поэтому меню не зависает даже без интернета.
+# Ответ проверяется на вид «1.2.3» или «v1.2.3»: всё остальное (страница с ошибкой и т. п.) считается неудачей. Пустое значение = «не удалось проверить».
+refresh_latest_versions() {
+    local tmp="$DIR_TMP/latest.$$" p1 p2 p3 v
+    mkdir -p "$tmp" "$DIR_CACHE"
+    ( script_last_version > "$tmp/script" 2>/dev/null ) & p1=$!
+    ( panel_last_version  > "$tmp/panel"  2>/dev/null ) & p2=$!
+    ( xray_last_version   > "$tmp/xray"   2>/dev/null ) & p3=$!
+    wait $p1 $p2 $p3 2>/dev/null
+    for v in script panel xray; do
+        local val
+        val=$(head -n1 "$tmp/$v" 2>/dev/null | tr -cd 'A-Za-z0-9._+-')
+        [[ "$val" =~ ^v?[0-9]+(\.[0-9]+)+$ ]] || val=""
+        case $v in
+            script) LATEST_SCRIPT="$val" ;;
+            panel)  LATEST_PANEL="$val" ;;
+            xray)   LATEST_XRAY="$val" ;;
+        esac
+    done
+    LATEST_CHECK_TIME=$(date +%s)
+    printf 'LATEST_CHECK_TIME="%s"\nLATEST_SCRIPT="%s"\nLATEST_PANEL="%s"\nLATEST_XRAY="%s"\n' \
+        "$LATEST_CHECK_TIME" "$LATEST_SCRIPT" "$LATEST_PANEL" "$LATEST_XRAY" > "$DIR_CACHE/latest_versions"
+    rm -rf "$tmp"
+}
+
+# Подготавливает LATEST_SCRIPT, LATEST_PANEL и LATEST_XRAY для точек статуса в шапке меню.
+# Берёт значения из кэша; если кэша нет или он устарел, обращается к GitHub (refresh_latest_versions).
+# Срок годности кэша: 30 минут, если все три версии проверены, и 1 минута, если что-то не удалось (чтобы быстро перепроверить).
+load_latest_versions() {
+    local f="$DIR_CACHE/latest_versions" ttl=1800 age
+    LATEST_CHECK_TIME=0
+    LATEST_SCRIPT=""
+    LATEST_PANEL=""
+    LATEST_XRAY=""
+    [[ -f "$f" ]] && source "$f"
+    if [[ -z "$LATEST_SCRIPT" || -z "$LATEST_PANEL" || -z "$LATEST_XRAY" ]]; then
+        ttl=60
+    fi
+    age=$(( $(date +%s) - ${LATEST_CHECK_TIME:-0} ))
+    if (( age < 0 || age >= ttl )); then
+        echo -ne "Проверка версий...\r"
+        refresh_latest_versions
+        echo -ne "\033[K"
+    fi
+}
+
 # Очищает экран и печатает логотип.
 show_logo() {
     echo -e "${style_new_line}${color_red}
@@ -2523,11 +2623,18 @@ else
     fi
 	commands_arg=$2
 show_logo
-    echo -e "${color_yellow}Скрипт ${SHELL_SHORT_NAME^^}:     ${color_white}${CURRENT_VERSION_SCRIPT}${style_plain}"
+    # Если панель установлена, заранее узнаём последние версии (из кэша или с GitHub) для цветных точек справа от версий
+    local dot_script="" dot_panel=""
+    if [[ -f $DIR_PROJECT/$NAME_APP ]]; then
+        load_latest_versions
+        dot_script=" $(version_dot "$CURRENT_VERSION_SCRIPT" "$LATEST_SCRIPT")"
+        dot_panel=" $(version_dot "$CURRENT_VERSION_ALL" "$LATEST_PANEL")"
+    fi
+    echo -e "${color_yellow}Скрипт ${SHELL_SHORT_NAME^^}:     ${color_white}${CURRENT_VERSION_SCRIPT}${style_plain}${dot_script}"
 	# Собираем меню: «Выход» + пункты установки (если панели нет) или пункты управления (если панель есть).
 	show_main_menu=$menu_exit
     if [[ -f $DIR_PROJECT/$NAME_APP ]]; then
-        echo -e "Панель ${SHELL_SHORT_NAME^^}:     $CURRENT_VERSION_ALL" && show_xray_version && show_main_menu+=$menu_extra && echo -e "" && show_status && echo -e ""
+        echo -e "Панель ${SHELL_SHORT_NAME^^}:     $CURRENT_VERSION_ALL${dot_panel}" && show_xray_version && show_main_menu+=$menu_extra && echo -e "" && show_status && echo -e ""
 	else
         show_main_menu+=$menu_install
     fi
