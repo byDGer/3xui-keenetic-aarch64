@@ -7,13 +7,14 @@
 #    • включает HTTPS (самоподписанный сертификат) и умеет получать сертификат Let's Encrypt для вашего домена;
 #    • запускает/останавливает панель, включает автозапуск, меняет логин, пароль, порт;
 #    • делает резервные копии базы данных, выгружает её в json, обновляет geo-файлы;
+#    • показывает версию Xray, стоящую в панели, и умеет обновлять только ядро Xray (XTLS/Xray-core);
 #    • обновляет сам себя из репозитория SCRIPT_REPO (см. CURRENT_VERSION_SCRIPT).
 #
 #  Как запускать (на роутере, в Entware, от root):
 #    bash x-ui.sh                  — при первом запуске предложит выбор: автоматическая установка или самостоятельная настройка;
 #                                    после установки откроет меню управления (то же самое делает команда x-ui)
 #    x-ui <команда>                — выполнить команду без меню, например:
-#                                    start | stop | restart | status | enable | disable | view_panel | ssl | ssl_domain | ssl_remove | update
+#                                    start | stop | restart | status | enable | disable | view_panel | ssl | ssl_domain | ssl_remove | update | update_xray
 #    bash x-ui.sh auto_install     — автоматическая установка без вопросов
 #
 #  Где что лежит:
@@ -52,7 +53,7 @@ color_bgreen='\033[1;32m'
 declare -A ICO_MAP=( [GOOD]="[ ✔ ]" [BAD]="[ ✘ ]" [WORK]="[ ⚙ ]" [INF]="[INF]" [ERR]="[ERR]" [WAR]="[⚠️]" )
 
 # Версия этого скрипта. При выпуске обновления её нужно увеличить: по ней скрипт понимает, что на GitHub есть новая версия.
-CURRENT_VERSION_SCRIPT="1.0.3"
+CURRENT_VERSION_SCRIPT="1.0.4"
 # Репозиторий, из которого скрипт обновляет сам себя (ветка main).
 SCRIPT_REPO="byDGer/3xui-keenetic-aarch64"
 SCRIPT_RAW="https://raw.githubusercontent.com/$SCRIPT_REPO"
@@ -353,6 +354,176 @@ local patern=${6:-"get_menu_word"}
 	logmsg $schoice
 }
 
+# Путь к файлу ядра Xray внутри панели (например, /opt/etc/x-ui/bin/xray-linux-arm64).
+# Копии с суффиксами .bak и .new (резервная копия и временный файл при обновлении) не учитываются.
+xray_bin_path() {
+    ls "$DIR_PROJECT"/bin/xray-linux-* 2>/dev/null | grep -v -E '\.(bak|new)$' | head -n1
+}
+
+# Версия Xray, которая сейчас стоит в панели (например, 25.8.3).
+# Берётся прямо из файла ядра при каждом вызове, поэтому всегда актуальна (в том числе после обновления Xray из веб-интерфейса панели).
+# Ядро печатает первой строкой «Xray <версия> (...)»: берём второе слово. Если ядра нет или оно не запускается — пусто.
+xray_version() {
+    local bin v
+    bin=$(xray_bin_path)
+    [[ -n "$bin" && -x "$bin" ]] || return 1
+    v=$("$bin" -version 2>/dev/null | head -n1 | awk '{print $2}')
+    # В некоторых сборках версия запрашивается подкомандой, а не ключом
+    if [[ -z "$v" ]]; then
+        v=$("$bin" version 2>/dev/null | head -n1 | awk '{print $2}')
+    fi
+    echo "$v"
+}
+
+# Печатает строку «Версия XRay:  x.x.x» для шапки главного меню. Всегда возвращает 0, чтобы не обрывать цепочку команд в show_main_menu.
+show_xray_version() {
+    local v
+    v=$(xray_version)
+    echo -e "Версия XRay:     ${v:-не определена}"
+    return 0
+}
+
+# Последняя версия Xray на GitHub (XTLS/Xray-core), например v25.8.3.
+# Сначала берётся из переадресации страницы «releases/latest» (не зависит от лимитов API), запасной способ — GitHub API.
+xray_last_version() {
+    local tag
+    tag=$(curl -4 -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/XTLS/Xray-core/releases/latest" 2>/dev/null | sed -n 's|.*/releases/tag/\(.*\)|\1|p')
+    if [[ -z "$tag" ]]; then
+        tag=$(curl -4 -fsSL "https://api.github.com/repos/XTLS/Xray-core/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
+    echo "$tag"
+}
+
+# Имя архива с ядром в релизах XTLS/Xray-core зависит от архитектуры процессора (переменная ARCHITECTURE).
+# Результат — в XRAY_ZIP_NAME. Для неизвестной архитектуры возвращает 1.
+xray_zip_name() {
+    case "$ARCHITECTURE" in
+        amd64) XRAY_ZIP_NAME="Xray-linux-64.zip" ;;
+        386)   XRAY_ZIP_NAME="Xray-linux-32.zip" ;;
+        arm64) XRAY_ZIP_NAME="Xray-linux-arm64-v8a.zip" ;;
+        armv7) XRAY_ZIP_NAME="Xray-linux-arm32-v7a.zip" ;;
+        armv6) XRAY_ZIP_NAME="Xray-linux-arm32-v6.zip" ;;
+        armv5) XRAY_ZIP_NAME="Xray-linux-arm32-v5.zip" ;;
+        s390x) XRAY_ZIP_NAME="Xray-linux-s390x.zip" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Пункт меню «Обновить только XRay»: обновляет ядро Xray до последней версии с GitHub (XTLS/Xray-core).
+# Панель, настройки, клиенты и база данных не затрагиваются. Порядок действий:
+#   1) сравнить установленную версию с последней;  2) скачать архив и проверить контрольную сумму SHA-256;
+#   3) распаковать и пробно запустить новое ядро;  4) остановить панель, заменить файл ядра (старый сохраняется как .bak);
+#   5) запустить панель снова (если она работала до обновления).
+update_xray() {
+    check_install || return 1
+    check_architecture 1
+    if ! xray_zip_name; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Для архитектуры $ARCHITECTURE нет готового ядра Xray.${style_plain}"
+        return 1
+    fi
+    local bin cur last
+    bin=$(xray_bin_path)
+    if [[ -z "$bin" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Файл ядра Xray не найден в $DIR_PROJECT/bin${style_plain}"
+        return 1
+    fi
+    cur=$(xray_version)
+    logmsg "${color_green}${ICO_MAP[WORK]} Проверка последней версии XRay на GitHub (XTLS/Xray-core)...${style_plain}"
+    last=$(xray_last_version)
+    if [[ -z "$last" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось получить версию XRay, попробуйте позже${style_plain}"
+        return 1
+    fi
+    if [[ "${last#v}" == "$cur" ]]; then
+        logmsg "${color_green}Установлена последняя версия XRay: ${cur}${style_plain}"
+        confirm_options "Переустановить XRay принудительно" "n"
+        [[ $? == 0 ]] || return 0
+    else
+        logmsg "${color_yellow}Доступна новая версия XRay: ${last#v}, у вас: ${cur:-неизвестно}${style_plain}"
+        confirm_options "Обновить XRay до ${last#v} (панель и настройки не пострадают). Продолжить" "y"
+        [[ $? == 0 ]] || return 0
+    fi
+
+    # Для распаковки архива нужна программа unzip
+    if ! command -v unzip >/dev/null 2>&1; then
+        logmsg "${color_green}${ICO_MAP[WORK]} Устанавливаю unzip...${style_plain}"
+        opkg install unzip >/dev/null 2>&1
+        if ! command -v unzip >/dev/null 2>&1; then
+            logmsg "${color_red}${ICO_MAP[ERR]} Не удалось установить unzip.${style_plain}"
+            return 1
+        fi
+    fi
+
+    # --- скачивание ---
+    local url="https://github.com/XTLS/Xray-core/releases/download/${last}/${XRAY_ZIP_NAME}"
+    local work="$DIR_TMP/xray-update"
+    local archive="$work/$XRAY_ZIP_NAME"
+    rm -rf "$work"
+    mkdir -p "$work"
+    logmsg "${color_green}${ICO_MAP[WORK]} Скачиваю $XRAY_ZIP_NAME (${last})...${style_plain}"
+    if ! curl -4 -fsSL -o "$archive" "$url"; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось скачать: $url${style_plain}"
+        rm -rf "$work"
+        return 1
+    fi
+
+    # --- проверка контрольной суммы (файл .dgst лежит рядом с архивом в релизе) ---
+    local expected actual
+    expected=$(curl -4 -fsSL "${url}.dgst" 2>/dev/null | grep -i '256' | grep -Eo '[0-9a-fA-F]{64}' | head -n1)
+    if [[ -n "$expected" ]] && command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$archive" | awk '{print $1}')
+        if [[ "${actual,,}" != "${expected,,}" ]]; then
+            logmsg "${color_red}${ICO_MAP[ERR]} Контрольная сумма архива не совпала: файл повреждён или подменён. Обновление отменено.${style_plain}"
+            rm -rf "$work"
+            return 1
+        fi
+        logmsg "${color_green}${ICO_MAP[INF]} Контрольная сумма SHA-256 совпала.${style_plain}"
+    else
+        logmsg "${color_yellow}${ICO_MAP[WAR]} Не удалось проверить контрольную сумму (нет файла .dgst или программы sha256sum): продолжаю без проверки.${style_plain}"
+    fi
+
+    # --- распаковка: нужен только файл xray (в архиве ещё лежат geo-файлы, они не трогаются) ---
+    unzip -o -q "$archive" xray -d "$work" 2>/dev/null || unzip -o -q "$archive" -d "$work" 2>/dev/null
+    if [[ ! -f "$work/xray" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} В архиве не найден файл xray.${style_plain}"
+        rm -rf "$work"
+        return 1
+    fi
+    chmod 755 "$work/xray"
+    # Пробный запуск: убеждаемся, что новое ядро запускается на этом процессоре
+    local newver
+    newver=$("$work/xray" -version 2>/dev/null | head -n1 | awk '{print $2}')
+    if [[ -z "$newver" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Новое ядро не запускается на этом роутере. Обновление отменено, старое ядро не тронуто.${style_plain}"
+        rm -rf "$work"
+        return 1
+    fi
+
+    # --- замена ядра ---
+    local was_running=0
+    check_status
+    [[ $? == 0 ]] && was_running=1
+    if [[ $was_running == 1 ]]; then
+        stop
+    fi
+    # Ядро запускается панелью как отдельный процесс: на случай, если он остался, завершаем его
+    pkill -f "$DIR_PROJECT/bin/xray-linux" 2>/dev/null
+    cp -f "$bin" "$bin.bak"
+    # Копируем в рабочий каталог под временным именем и переименовываем: так подмена файла происходит целиком
+    if cp -f "$work/xray" "$bin.new" && chmod 755 "$bin.new" && mv -f "$bin.new" "$bin"; then
+        logmsg "${color_green}${ICO_MAP[INF]} Ядро XRay обновлено: ${cur:-?} → ${newver}. Старая версия сохранена: $bin.bak${style_plain}"
+    else
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось заменить файл ядра. Старое ядро осталось на месте.${style_plain}"
+        rm -f "$bin.new"
+    fi
+    rm -rf "$work"
+    # Запускаем панель снова, если она работала до обновления
+    if [[ $was_running == 1 ]]; then
+        start
+    fi
+    logmsg "${color_green}Сейчас установлена версия XRay: $(xray_version)${style_plain}"
+}
+
 # Сравнивает установленную версию панели с последней на GitHub (MHSanaei/3x-ui).
 # Если вышла новая — предлагает переустановить панель (данные сохраняются).
 update_panel(){
@@ -406,7 +577,7 @@ update_all(){
     fi
 }
 
-# Меню обновления: всё сразу / только скрипт / только панель.
+# Меню обновления: всё сразу / только скрипт / только панель / только XRay.
 update(){
     check_install
     menu_choice menu_update "$1" "Выберите действие обновления"
@@ -2228,6 +2399,7 @@ show_main_menu::${color_magenta}Главное меню${style_plain}
 update_all::Обновить всё
 update_script::Обновить только скрипт
 update_panel::Обновить только панель
+update_xray::Обновить только XRay
 "
 # Подменю настроек.
 menu_settings="
@@ -2355,7 +2527,7 @@ show_logo
 	# Собираем меню: «Выход» + пункты установки (если панели нет) или пункты управления (если панель есть).
 	show_main_menu=$menu_exit
     if [[ -f $DIR_PROJECT/$NAME_APP ]]; then
-        echo -e "Панель ${SHELL_SHORT_NAME^^}:     $CURRENT_VERSION_ALL" && show_main_menu+=$menu_extra && echo -e "" && show_status && echo -e ""
+        echo -e "Панель ${SHELL_SHORT_NAME^^}:     $CURRENT_VERSION_ALL" && show_xray_version && show_main_menu+=$menu_extra && echo -e "" && show_status && echo -e ""
 	else
         show_main_menu+=$menu_install
     fi
