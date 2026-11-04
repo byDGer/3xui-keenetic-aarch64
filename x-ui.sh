@@ -162,6 +162,17 @@ random_string() {
     tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "${1:-12}"
 }
 
+# IP-адрес роутера в локальной сети (интерфейс br0). Понимает оба формата вывода ifconfig
+# («inet addr:192.168.1.1» и «inet 192.168.1.1»), а если ifconfig не помог — берёт адрес командой ip.
+lan_ip() {
+    local addr
+    addr=$(ifconfig br0 2>/dev/null | sed -n -e 's/.*inet addr:\([0-9.]*\).*/\1/p' -e 's/^[[:space:]]*inet \([0-9.]*\).*/\1/p' | head -n1)
+    if [[ -z "$addr" ]]; then
+        addr=$(ip -4 -o addr show br0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)
+    fi
+    echo "$addr"
+}
+
 # Главная функция вывода сообщений.
 # Печатает текст на экран и дублирует его в файл журнала вместе с датой и цепочкой вызовов функций.
 # Параметр 1 — сообщение, параметр 2 — слово nolog (писать только в журнал, на экран не выводить).
@@ -230,7 +241,7 @@ NAME_REAL_SHELL=$(real_name)
 check_os_release() {
     local release_path=$(command -v opkg)
     if  [[ "$release_path" != "/opt/bin/opkg" ]]; then
-        logmsg "${color_red}Неподдерживаемая операционная система!${style_plain}" && rm -f "$SHELL_FULL_NAME" && exit 1
+        logmsg "${color_red}Неподдерживаемая операционная система!${style_plain}" && exit 1
     fi
     release="entware"
     if [[ -z $1 ]]; then
@@ -243,12 +254,12 @@ check_architecture() {
     case "$(uname -m)" in
         x86_64 | x64 | amd64) ARCHITECTURE='amd64' ;;
         i*86 | x86) ARCHITECTURE='386' ;;
-        armv8* | armv8 | arm64 | aarch64) ARCHITECTURE='arm64' ;;
-        armv7* | armv7 | arm) ARCHITECTURE='armv7' ;;
-        armv6* | armv6) ARCHITECTURE='armv6' ;;
-        armv5* | armv5) ARCHITECTURE='armv5' ;;
+        armv8* | arm64 | aarch64) ARCHITECTURE='arm64' ;;
+        armv7* | arm) ARCHITECTURE='armv7' ;;
+        armv6*) ARCHITECTURE='armv6' ;;
+        armv5*) ARCHITECTURE='armv5' ;;
         s390x) ARCHITECTURE='s390x' ;;
-        *) logmsg "${color_red}Неподдерживаемая архитектура процессора! ${style_plain}" && rm -f "$SHELL_FULL_NAME" && exit 1 ;;
+        *) logmsg "${color_red}Неподдерживаемая архитектура процессора! ${style_plain}" && exit 1 ;;
     esac
     if [[ -z $1 ]]; then
         logmsg "${ICO_MAP[GOOD]} Архитектура: $ARCHITECTURE"
@@ -282,15 +293,14 @@ get_menu_word() {
 # Устанавливает через opkg всё, что нужно панели и скрипту.
 install_base() {
     check_architecture
-    logmsg "${ICO_MAP[WORK]} ${color_green}Проверка подготовки... без паники! ;) ${style_plain}"
-    sleep 1
+    logmsg "${ICO_MAP[WORK]} ${color_green}Установка необходимых пакетов...${style_plain}"
     case "${release}" in
     entware)
         # Пакеты: wget и curl — загрузка, tar — распаковка, ca-certificates и *-ssl — HTTPS,
         # sqlite3-cli — работа с базой, jq — разбор json, openssl-util и libopenssl — сертификаты.
         opkg update && opkg install wget curl tar wget-ssl ca-certificates sqlite3-cli jq openssl-util libopenssl
         ;;
-    *) logmsg "${color_red}Неподдерживаемый релиз! ${release}" && rm -f "$SHELL_FULL_NAME" && exit 1
+    *) logmsg "${color_red}Неподдерживаемый релиз! ${release}" && exit 1
 		;;
     esac
 }
@@ -306,19 +316,6 @@ migration(){
 config_after_install() {
     exe_set_panel
     exe_set_admin
-}
-
-# Подготовка к чистой установке: удаляет файлы проекта (кроме скрипта и каталога с базой db), ссылку автозапуска и команду x-ui.
-prepare_services() {
-    if [[ -d $DIR_PROJECT ]]; then
-        find $DIR_PROJECT -type f,d  -not \( -name "$SHELL_FULL_NAME" -or -name 'db' \) -delete
-    fi
-    if [[ -f "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME" ]]; then
-        rm "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME" -f
-    fi
-    if [[ -f $DIR_INSTALL_LNK ]]; then
-        rm $DIR_INSTALL_LNK -f
-    fi
 }
 
 # Вызывается в самом конце: если в этом запуске показывалось главное меню, ждёт Enter и возвращает в него.
@@ -358,7 +355,14 @@ local patern=${6:-"get_menu_word"}
 # Путь к файлу ядра Xray внутри панели (например, /opt/etc/x-ui/bin/xray-linux-arm64).
 # Копии с суффиксами .bak и .new (резервная копия и временный файл при обновлении) не учитываются.
 xray_bin_path() {
-    ls "$DIR_PROJECT"/bin/xray-linux-* 2>/dev/null | grep -v -E '\.(bak|new)$' | head -n1
+    local f
+    for f in "$DIR_PROJECT"/bin/xray-linux-*; do
+        if [[ -f "$f" && "$f" != *.bak && "$f" != *.new ]]; then
+            echo "$f"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Версия Xray, которая сейчас стоит в панели (например, 25.8.3).
@@ -622,9 +626,15 @@ download_proc() {
         url="https://github.com/MHSanaei/3x-ui/releases/download/${version_to_check}/x-ui-linux-${ARCHITECTURE}.tar.gz"
     fi
     
-    # Скачиваем файл (проверка сертификата отключена, как в исходном проекте).
-    wget --no-check-certificate -O "$outfile" "${url}"
-    if [[ $? -ne 0 ]]; then
+    # Скачиваем файл. Сертификат сайта проверяется (пакеты wget-ssl и ca-certificates ставятся в install_base).
+    wget -O "$outfile" "${url}"
+    local wget_rc=$?
+    if [[ $wget_rc -eq 5 ]]; then
+        # Код 5 у wget — не удалось проверить сертификат: повторять с другим тегом бессмысленно
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось проверить сертификат сайта загрузки. Проверьте дату и время на роутере и пакет ca-certificates (opkg install ca-certificates).${style_plain}"
+        return 1
+    fi
+    if [[ $wget_rc -ne 0 ]]; then
         if [[ $version_to_check != v* && -z $version_type ]]; then
             logmsg "${ICO_MAP[GOOD]} Повторная попытка загрузки с ${color_magenta}v${style_plain}"
             download_proc $type "v"
@@ -794,14 +804,9 @@ custom() {
 	install $1 "${map_confirm[panel_version_$1]}" "$3"
 }
 
-# Установка выбранной пользователем версии панели.
-install_custom_PANEL(){
-    custom $NAME_APP "" 1
-}
-
-# То же самое, но с именем в нижнем регистре: его вызывает меню (имена пунктов приводятся к нижнему регистру).
+# Установка выбранной пользователем версии панели. Имя в нижнем регистре: так её вызывает меню (ключи пунктов приводятся к нижнему регистру).
 install_custom_panel(){
-    install_custom_PANEL
+    custom $NAME_APP "" 1
 }
 
 # Установка выбранной пользователем версии скрипта (версия = тег в репозитории, например 1.0.3 или v1.0.3).
@@ -819,27 +824,42 @@ install_custom(){
 }
 
 # Полное удаление панели: останавливает её, убирает автозапуск, команду x-ui и каталог /opt/etc/x-ui. Спрашивает подтверждение.
+# Резервные копии базы (каталог backup) по умолчанию переносятся в /opt/root/x-ui-backup, чтобы не пропасть вместе с панелью.
+# Строка автопродления сертификата убирается из cron. Каталог acme.sh (/opt/etc/acme.sh) остаётся: его можно удалить вручную.
 uninstall() {
     if [[ ! -f $DIR_PROJECT/$NAME_APP ]]; then
-    logmsg "${color_red}Панель не установлена!${style_plain}"
-	else
-		confirm_options "Вы уверены, что хотите удалить панель" "n" "" "$color_red"
-		if [[ $? == 0 ]]; then
-            if [[ -d $DIR_PROJECT ]]; then
-            logmsg "${color_yellow}Удаление... ${style_plain}"
-            stop && disable
-            rm -rf "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME"
-            rm -rf $DIR_INSTALL_LNK
-            rm -rf $DIR_PROJECT
-            logmsg "${color_yellow}Успешно удалено${style_plain}"
-            logmsg "${color_yellow}Журнал сохранён в $DIR_LOGFILE!${style_plain}"
-            logmsg "${color_yellow}Для удаления:${style_plain} ${color_magenta}rm -rf $DIR_LOGFILE${style_plain}"
-			echo "$SHELL_SHORT_NAME удалён" && kill -9 $$
-			else
-                logmsg "${color_red}Панель не установлена! ${style_plain}"
-			fi
-		fi
-	fi
+        logmsg "${color_red}Панель не установлена!${style_plain}"
+        return
+    fi
+    confirm_options "Вы уверены, что хотите удалить панель" "n" "" "$color_red"
+    [[ $? == 0 ]] || return
+    logmsg "${color_yellow}Удаление... ${style_plain}"
+    stop && disable
+    # Резервные копии переносим за пределы каталога проекта, иначе они удалятся вместе с панелью
+    local keep_dir=""
+    if [[ -n "$(ls -A "$DIR_PROJECT/backup" 2>/dev/null)" ]]; then
+        confirm_options "Сохранить резервные копии базы данных в $DIR_ENTWARE/root/x-ui-backup" "y"
+        if [[ $? == 0 ]]; then
+            keep_dir="$DIR_ENTWARE/root/x-ui-backup"
+            [[ -e "$keep_dir" ]] && keep_dir="${keep_dir}-$(date +%Y%m%d%H%M%S)"
+            mkdir -p "$DIR_ENTWARE/root" && mv "$DIR_PROJECT/backup" "$keep_dir" || keep_dir=""
+        fi
+    fi
+    # Автопродление сертификата больше не нужно: убираем строку из cron
+    if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q 'acme.sh --cron'; then
+        crontab -l 2>/dev/null | grep -v 'acme.sh --cron' | crontab -
+        logmsg "${color_yellow}Автопродление сертификата убрано из cron${style_plain}"
+    fi
+    rm -rf "${DIR_AUTO_START:?}/$PRIORITY$SHELL_SHORT_NAME"
+    rm -rf "${DIR_INSTALL_LNK:?}"
+    rm -rf "${DIR_PROJECT:?}"
+    logmsg "${color_yellow}Успешно удалено${style_plain}"
+    [[ -n "$keep_dir" ]] && logmsg "${color_yellow}Резервные копии сохранены: $keep_dir${style_plain}"
+    [[ -d "$DIR_ACME" ]] && logmsg "${color_yellow}Каталог acme.sh остался: $DIR_ACME (удалить: rm -rf $DIR_ACME)${style_plain}"
+    logmsg "${color_yellow}Журнал сохранён в $DIR_LOGFILE!${style_plain}"
+    logmsg "${color_yellow}Для удаления:${style_plain} ${color_magenta}rm -rf $DIR_LOGFILE${style_plain}"
+    echo "$SHELL_SHORT_NAME удалён"
+    exit 0
 }
 
 # Автоматическая установка без вопросов:
@@ -872,7 +892,7 @@ auto_install() {
     info=$("$DIR_PROJECT/$NAME_APP" setting -show 2>/dev/null)
     port=$(echo "$info" | grep -Eo 'port: .+' | awk '{print $2}' | head -n1)
     path=$(echo "$info" | grep -Eo 'webBasePath: .+' | awk '{print $2}' | head -n1)
-    ip=$(ifconfig br0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+    ip=$(lan_ip)
     # Узнаём, по какому протоколу панель отвечает на самом деле, а не только по настройкам:
     # сначала пробуем HTTPS (ключ -k: самоподписанный сертификат не проверяем), затем HTTP; ждём запуск до 10 секунд.
     local answered=0 i
@@ -990,12 +1010,12 @@ confirm_options() {
         # Автоматический режим: ничего не спрашиваем, берём значение по умолчанию.
         temp="$default"
     elif [[ -n "$default" ]]; then
-        echo -n -e "${txtcolor}$question $confirm_type? [по умолчанию: $default_show]:${style_plain}" && read -p " " temp
+        echo -n -e "${txtcolor}$question $confirm_type? [по умолчанию: $default_show]:${style_plain}" && read -r -p " " temp
         if [[ "${temp}" == "" ]]; then
             temp=$default
         fi
     else
-        echo -n -e "${txtcolor}$question $confirm_type?:${style_plain} " && read -p " " temp
+        echo -n -e "${txtcolor}$question $confirm_type?:${style_plain} " && read -r -p " " temp
     fi
     [[ "$3" == "config_password" ]] || logmsg "Choice: $temp" nolog
     if [[ -n "$confirm_type" ]]; then
@@ -1044,10 +1064,11 @@ show_admin() {
 }
 
 # Спрашивает логин, пароль и нужно ли отключить двухфакторную защиту и сохраняет это в панели.
-# Параметры 1–3 — значения по умолчанию (в автоматическом режиме — случайные AUTO_USER и AUTO_PASS).
+# Параметры 1–3 — значения по умолчанию. Если они не заданы, по умолчанию предлагаются случайные логин и пароль
+# (в автоматическом режиме — AUTO_USER и AUTO_PASS), а не стандартные admin / 12345.
 exe_set_admin() {
-        confirm_options "Укажите логин" "${1:-${AUTO_USER:-admin}}" "config_account"  $color_cyan
-        confirm_options "Укажите пароль" "${2:-${AUTO_PASS:-12345}}" "config_password" $color_cyan
+        confirm_options "Укажите логин" "${1:-${AUTO_USER:-$(random_string 8)}}" "config_account"  $color_cyan
+        confirm_options "Укажите пароль" "${2:-${AUTO_PASS:-$(random_string 16)}}" "config_password" $color_cyan
 		confirm_options "Отключить текущую двухфакторную аутентификацию (true/false)" "${3:-false}" "config_authentication" $color_cyan
         $DIR_PROJECT/$NAME_APP setting -username ${map_confirm[config_account]} -password ${map_confirm[config_password]} -resetTwoFactor ${map_confirm[config_authentication]}
 		show_admin "${map_confirm[config_account]}" "${map_confirm[config_password]}"
@@ -1100,7 +1121,7 @@ ssl_cert_files_ok() {
 # по стандартным путям $DIR_CERT/webCert.pem и webCertKey.pem. Код возврата — как у ssl_make_self_signed.
 ssl_make_lan_self_signed() {
     local ip cn
-    ip=$(ifconfig br0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+    ip=$(lan_ip)
     cn="${ip:-$(hostname 2>/dev/null)}"
     cn="${cn:-$SHELL_SHORT_NAME}"
     logmsg "${color_green}${ICO_MAP[WORK]} Создание самоподписанного сертификата RSA 4096 для $cn (на роутере это может занять до минуты)...${style_plain}"
@@ -1171,8 +1192,8 @@ ssl_check(){
 # Параметр 1 — не спрашивать про SSL. По умолчанию панель слушает адрес роутера в локальной сети (br0).
 exe_set_panel() {
 	confirm_options "Введите порт панели" "2053" "config_port" $color_cyan
-	confirm_options "Введите путь к панели" "${AUTO_PATH:-/spub/}" "config_path" $color_cyan
-	confirm_options "Введите IP-адрес для прослушивания" "$(ifconfig br0 | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')" "config_listenIP" $color_cyan
+	confirm_options "Введите путь к панели" "${AUTO_PATH:-/$(random_string 10)/}" "config_path" $color_cyan
+	confirm_options "Введите IP-адрес для прослушивания" "$(lan_ip)" "config_listenIP" $color_cyan
 	logmsg "${color_yellow}Инициализация, подождите...${style_plain}"
 	local params=""
 	[ -z "${map_confirm[config_port]}" ] || params="$params -port ${map_confirm[config_port]}"
@@ -1237,7 +1258,7 @@ view_panel() {
     else
         echo -e "${color_green}Адрес доступа: http://${server_ip}:${existing_port}${existing_webBasePath}${style_plain}\n"
     fi
-	local localip=$(ifconfig br0 | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+	local localip=$(lan_ip)
 	if [[ -n "$localip" ]]; then
 		echo -e "${color_green}Локальный адрес доступа: ${scheme}://${localip}:${existing_port}${existing_webBasePath}${style_plain}\n"
 	fi
@@ -1289,11 +1310,6 @@ stop() {
 }
 
 # Псевдоним для status.
-is_enabled() {
-	status
-}
-
-# Псевдоним для status.
 check() {
 	status
 }
@@ -1329,7 +1345,7 @@ disable() {
     if [[ ! -L "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME" && ! -f "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME" ]]; then
         logmsg "${color_green}${ICO_MAP[INF]} Автозапуск $SHELL_SHORT_NAME уже отключён${style_plain}"
     else
-        rm -rf "$DIR_AUTO_START/$PRIORITY$SHELL_SHORT_NAME"
+        rm -rf "${DIR_AUTO_START:?}/$PRIORITY$SHELL_SHORT_NAME"
         if [[ $? == 0 ]]; then
             logmsg "${color_green}${ICO_MAP[INF]} Автозапуск $SHELL_SHORT_NAME успешно отключён${style_plain}"
         else
@@ -1780,21 +1796,6 @@ is-enabled() {
 	fi 
 }
 
-# Читает значение по ключу (параметр 1) из таблицы (параметр 2) базы данных панели.
-db_get() {
-    KEY=$1
-    TABLE=$2
-    sqlite3 $DB "SELECT value FROM $TABLE WHERE key='$KEY';"
-}
-
-# Меняет значение по ключу (параметр 1) в таблице (параметр 2) на новое (параметр 3).
-db_upd() {
-    KEY=$1 
-    TABLE=$2
-    VALUE=$3
-    sqlite3 $DB "UPDATE $TABLE SET value='$VALUE' WHERE key='$KEY';"
-}
-
 # Собирает текст меню с номерами из текста вида:
 #     ключ::Русский текст   — пункт (ключ — имя функции, которую вызовет выбор)
 #     [br]                  — горизонтальная линия-разделитель
@@ -2151,7 +2152,7 @@ save_db_to_json() {
         esac
         local pragma cols select_list=""
         pragma=$(sqlite3 -separator '|' "$DB" "PRAGMA table_info('$tbl');")
-        while IFS='|' read -r cid name type notnull dflt pk; do
+        while IFS='|' read -r _ name type _ _ _; do
             [[ -z "$name" ]] && continue
             local utype=$(echo "$type" | tr '[:lower:]' '[:upper:]')
             if [[ "$utype" == "BLOB" ]]; then
@@ -2200,9 +2201,16 @@ JQ
     logmsg "${ICO_MAP[WORK]} Готово. Экспортировано: $exported, пропущено: $skipped"
 }
 
-# Выставляет права 755 на весь каталог проекта (/opt/etc/x-ui).
-permissions(){
-	chmod -R 755 $DIR_PROJECT
+# Выставляет права в каталоге проекта (/opt/etc/x-ui):
+#   • исполняемые файлы (скрипт, панель, ядра Xray) — 755;
+#   • каталоги с секретами (db — база, cert — сертификаты и ключи, backup — копии базы) закрываются от посторонних
+#     (владелец остаётся прежним: 700 для каталогов, у файлов убираются права группы и остальных).
+# Раньше на весь каталог ставилось 755, и приватный ключ с базой становились доступны для чтения всем.
+permissions() {
+    chmod 755 "$DIR_PROJECT" 2>/dev/null
+    chmod 755 "$DIR_PROJECT_SHELL_SCRIPTS" "$DIR_PROJECT/$NAME_APP" 2>/dev/null
+    chmod 755 "$DIR_PROJECT"/bin/xray-linux-* 2>/dev/null
+    chmod -R go-rwx "$DIR_PROJECT/db" "$DIR_PROJECT/cert" "$DIR_PROJECT/backup" 2>/dev/null
 }
 
 # Приводит установку в порядок: переименовывает и переносит скрипт в /opt/etc/x-ui,
@@ -2673,11 +2681,6 @@ logmsg "DIR EXECUTE: $DIR_NOTREAL_CUR/$NAME_NOTREAL_SHELL" nolog
 # AUTO_START ------------------------------------------------------------
 if [[ "$DIR_NOTREAL_CUR" == "$DIR_AUTO_START" ]]; then
     logmsg "Auto start script initialized" nolog
-	PROCS=$NAME_APP
-    ENABLED=yes
-    ARGS=""
-    PREARGS=""
-    DESC=$PROCS
     PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     ACTION=$1
     CALLER=$2
