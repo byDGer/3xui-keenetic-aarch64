@@ -101,9 +101,11 @@ ARCHITECTURE=""
 COMMANDS_CALL=""
 
 # Настройки скрипта (хранятся в /opt/etc/x-ui/config/settings и подхватываются при запуске):
-# DEBUG_SCRIPT — показывать цепочку вызовов функций, LOG_SCRIPT — вести журнал.
+# DEBUG_SCRIPT — показывать цепочку вызовов функций, LOG_SCRIPT — вести журнал,
+# CHECK_UPDATES — проверять на GitHub наличие новых версий для цветных точек в шапке меню (false — не обращаться к сети при открытии меню).
 DEBUG_SCRIPT=false
 LOG_SCRIPT=true
+CHECK_UPDATES=true
 # Переменные окружения, которые читает сама панель: где её ядро, база данных и журнал.
 XUI_BIN_FOLDER="$DIR_PROJECT/bin"
 XUI_DB_FOLDER="$DIR_DB"
@@ -135,6 +137,7 @@ else
 		echo -e "DEFAULT_EDITOR=\"$DEFAULT_EDITOR\"" >> "$DIR_CONFIG/settings"
 		echo -e "DEBUG_SCRIPT=\"$DEBUG_SCRIPT\"" >> "$DIR_CONFIG/settings"
 		echo -e "LOG_SCRIPT=\"$LOG_SCRIPT\"" >> "$DIR_CONFIG/settings"
+		echo -e "CHECK_UPDATES=\"$CHECK_UPDATES\"" >> "$DIR_CONFIG/settings"
 		echo -e "XUI_BIN_FOLDER=\"$XUI_BIN_FOLDER\"" >> "$DIR_CONFIG/settings"
 		echo -e "XUI_DB_FOLDER=\"$XUI_DB_FOLDER\"" >> "$DIR_CONFIG/settings"
 		echo -e "XUI_LOG_FOLDER=\"$XUI_LOG_FOLDER\"" >> "$DIR_CONFIG/settings"
@@ -177,24 +180,37 @@ lan_ip() {
 # Печатает текст на экран и дублирует его в файл журнала вместе с датой и цепочкой вызовов функций.
 # Параметр 1 — сообщение, параметр 2 — слово nolog (писать только в журнал, на экран не выводить).
 # При DEBUG_SCRIPT=true дополнительно показывает цепочку вызовов.
+# Работает без запуска внешних программ (date, sed): дата берётся встроенной printf, цветовые коды вырезаются подстановками bash.
+# Раньше каждое сообщение запускало 4 процесса (date и 3 sed), а на одно открытие меню приходилось около 11 сообщений.
 logmsg() {
     local msg="$1"
     local onlylog="$2"
-    local stack=""
-    local i
-    
-    for ((i=${#FUNCNAME[@]}-1; i>0; i--)); do
-        stack+="${FUNCNAME[$i]}"
-        if [[ $i -ne 1 ]]; then
-            stack+=" ${color_cyan}->${style_plain} "
-        fi
-    done
-    stack=$(echo -e "$stack" | sed -E 's/[[:space:]]*->[[:space:]]*$//')
+    local stack="" plain_stack="" i now clean
+    # Цепочка вызовов нужна только для журнала и отладки: иначе не тратим время на её сборку
+    if [[ "$LOG_SCRIPT" == true || "$DEBUG_SCRIPT" == true ]]; then
+        for ((i=${#FUNCNAME[@]}-1; i>0; i--)); do
+            stack+="${FUNCNAME[$i]}"
+            plain_stack+="${FUNCNAME[$i]}"
+            if [[ $i -ne 1 ]]; then
+                stack+=" ${color_cyan}->${style_plain} "
+                plain_stack+=" -> "
+            fi
+        done
+    fi
     if [[ "$LOG_SCRIPT" == true ]]; then
-        local now
-        now="$(date '+%Y-%m-%d %H:%M:%S')"
-        echo -e "[$now] [TRACE] $(echo -e "$stack" | strip_ansi)" >> "$DIR_LOGFILE"
-        echo -e "[$now] [MESSAGE]$(echo -e "$msg" | strip_ansi)" >> "$DIR_LOGFILE"
+        printf -v now '%(%Y-%m-%d %H:%M:%S)T' -1
+        # Раскрываем \033, \n и т. п. (как echo -e) и вырезаем цветовые последовательности ESC[...m и прочие управляющие коды
+        printf -v clean '%b' "$msg"
+        local ansi_re=$'\e''\[[0-9;?]*[ -/]*[@-~]'
+        while [[ "$clean" =~ $ansi_re ]]; do
+            clean="${clean//"${BASH_REMATCH[0]}"/}"
+        done
+        clean="${clean//$'\e'/}"
+        # Как и раньше, конечные переводы строки в журнал не попадают
+        while [[ "$clean" == *$'\n' ]]; do
+            clean="${clean%$'\n'}"
+        done
+        printf '[%s] [TRACE] %s\n[%s] [MESSAGE]%s\n' "$now" "$plain_stack" "$now" "$clean" >> "$DIR_LOGFILE"
         if [[ "$onlylog" != "nolog" ]]; then
             echo -e "$msg"
         fi
@@ -219,6 +235,11 @@ real_dir_shell(){
 	logmsg "$SCRIPT_DIR"
 }
 
+# Ротация журнала: если файл вырос больше 512 КБ, он откладывается в script_x-ui.log.1 (прежний .1 заменяется),
+# а запись продолжается в новый файл. Так журнал не растёт бесконечно на флешке роутера.
+if [[ -f "$DIR_LOGFILE" && $(wc -c < "$DIR_LOGFILE") -gt 524288 ]]; then
+    mv -f "$DIR_LOGFILE" "$DIR_LOGFILE.1"
+fi
 # Настоящее расположение скрипта (с учётом символических ссылок).
 DIR_REAL_SHELL=$(real_dir_shell)
 
@@ -365,17 +386,42 @@ xray_bin_path() {
     return 1
 }
 
+# Последний релиз репозитория на GitHub, например v1.2.3. Параметры: 1 — репозиторий (владелец/имя), 2 — ограничение времени
+# каждого запроса в секундах (по умолчанию 8). Сначала берётся из переадресации страницы «releases/latest» (не зависит от лимитов API),
+# запасной способ — GitHub API (поле tag_name ищется и в «красивом», и в сжатом JSON). Печатает тег или ничего, если проверить не удалось.
+github_latest_tag() {
+    local repo="$1" max="${2:-8}" tag
+    tag=$(curl -4 -fsSL --max-time "$max" -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest" 2>/dev/null | sed -n 's|.*/releases/tag/\(.*\)|\1|p')
+    if [[ -z "$tag" ]]; then
+        tag=$(curl -4 -fsSL --max-time "$max" "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+    fi
+    echo "$tag"
+}
+
 # Версия Xray, которая сейчас стоит в панели (например, 25.8.3).
-# Берётся прямо из файла ядра при каждом вызове, поэтому всегда актуальна (в том числе после обновления Xray из веб-интерфейса панели).
 # Ядро печатает первой строкой «Xray <версия> (...)»: берём второе слово. Если ядра нет или оно не запускается — пусто.
+# Запуск ядра — самая дорогая операция при открытии меню, поэтому результат кэшируется в $DIR_CACHE/xray_version
+# и перечитывается только тогда, когда файл ядра новее кэша (то есть его заменили: обновление из меню или из панели).
+# Время файлов сравнивается встроенной проверкой -nt, без запуска программ.
 xray_version() {
-    local bin v
+    local bin v cache="$DIR_CACHE/xray_version"
     bin=$(xray_bin_path)
     [[ -n "$bin" && -x "$bin" ]] || return 1
+    if [[ -f "$cache" && ! "$bin" -nt "$cache" ]]; then
+        v=$(<"$cache")
+        if [[ -n "$v" ]]; then
+            echo "$v"
+            return 0
+        fi
+    fi
     v=$("$bin" -version 2>/dev/null | head -n1 | awk '{print $2}')
     # В некоторых сборках версия запрашивается подкомандой, а не ключом
     if [[ -z "$v" ]]; then
         v=$("$bin" version 2>/dev/null | head -n1 | awk '{print $2}')
+    fi
+    if [[ -n "$v" ]]; then
+        mkdir -p "$DIR_CACHE"
+        echo "$v" > "$cache"
     fi
     echo "$v"
 }
@@ -385,19 +431,17 @@ xray_version() {
 show_xray_version() {
     local v
     v=$(xray_version)
-    echo -e "Версия XRay:     ${v:-не определена} $(version_dot "$v" "$LATEST_XRAY")"
+    if [[ "$CHECK_UPDATES" == true ]]; then
+        echo -e "Версия XRay:     ${v:-не определена} $(version_dot "$v" "$LATEST_XRAY")"
+    else
+        echo -e "Версия XRay:     ${v:-не определена}"
+    fi
     return 0
 }
 
 # Последняя версия Xray на GitHub (XTLS/Xray-core), например v25.8.3.
-# Сначала берётся из переадресации страницы «releases/latest» (не зависит от лимитов API), запасной способ — GitHub API.
 xray_last_version() {
-    local tag
-    tag=$(curl -4 -fsSL --max-time 8 -o /dev/null -w '%{url_effective}' "https://github.com/XTLS/Xray-core/releases/latest" 2>/dev/null | sed -n 's|.*/releases/tag/\(.*\)|\1|p')
-    if [[ -z "$tag" ]]; then
-        tag=$(curl -4 -fsSL --max-time 8 "https://api.github.com/repos/XTLS/Xray-core/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
-    fi
-    echo "$tag"
+    github_latest_tag XTLS/Xray-core 8
 }
 
 # Имя архива с ядром в релизах XTLS/Xray-core зависит от архитектуры процессора (переменная ARCHITECTURE).
@@ -517,6 +561,8 @@ update_xray() {
     cp -f "$bin" "$bin.bak"
     # Копируем в рабочий каталог под временным именем и переименовываем: так подмена файла происходит целиком
     if cp -f "$work/xray" "$bin.new" && chmod 755 "$bin.new" && mv -f "$bin.new" "$bin"; then
+        # Кэш версии сбрасываем явно: на файловых системах с грубым временем изменения (например, FAT) сравнение времени могло бы не заметить замену
+        rm -f "$DIR_CACHE/xray_version"
         logmsg "${color_green}${ICO_MAP[INF]} Ядро XRay обновлено: ${cur:-?} → ${newver}. Старая версия сохранена: $bin.bak${style_plain}"
     else
         logmsg "${color_red}${ICO_MAP[ERR]} Не удалось заменить файл ядра. Старое ядро осталось на месте.${style_plain}"
@@ -590,18 +636,16 @@ update(){
     safe_call_function "$schoice"
 }
 
-# Узнаёт последнюю версию: для панели — на GitHub (сначала через API, запасной способ — по переадресации страницы релиза),
-# для скрипта — из строки CURRENT_VERSION_SCRIPT в x-ui.sh репозитория. Результат — в LAST_VERSION_PANEL / LAST_VERSION_SCRIPT.
+# Узнаёт последнюю версию: для панели — на GitHub (MHSanaei/3x-ui), для скрипта — из строки CURRENT_VERSION_SCRIPT в x-ui.sh
+# репозитория. Результат — в LAST_VERSION_PANEL / LAST_VERSION_SCRIPT. Возвращает 1, если версию только что запросили,
+# и 0, если она уже была известна (или проверять нечего).
 last_version_checked(){
     if [[ "$LAST_VERSION_SCRIPT" == "" && $1 == "script" ]]; then
-        LAST_VERSION_SCRIPT=$(curl -fsSL "$SCRIPT_RAW/main/$SHELL_FULL_NAME" 2>/dev/null | grep -m1 '^CURRENT_VERSION_SCRIPT=' | cut -d'"' -f2)
+        LAST_VERSION_SCRIPT=$(script_last_version)
         return 1
     fi
     if [[ "$LAST_VERSION_PANEL" == "" && $1 == "$NAME_APP" ]]; then
-        LAST_VERSION_PANEL=$(curl -4 -Ls "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ -z "$LAST_VERSION_PANEL" ]]; then
-            LAST_VERSION_PANEL=$(curl -4 -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/MHSanaei/3x-ui/releases/latest" 2>/dev/null | sed -n 's|.*/releases/tag/\(.*\)|\1|p')
-        fi
+        LAST_VERSION_PANEL=$(panel_last_version)
         return 1
     fi
     return 0
@@ -1100,21 +1144,27 @@ restart() {
     [[ $status == 0 ]] && logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME успешно перезапущен${style_plain}" || logmsg "${color_red}${ICO_MAP[ERR]}Не удалось перезапустить $SHELL_SHORT_NAME, возможно, запуск занимает больше двух секунд. Проверьте журнал позже${style_plain}"
 }
 
+# Читает из панели пути к сертификату и ключу ОДНИМ запуском программы панели (она запускается долго).
+# Результат — в переменных SSL_CERT_FILE и SSL_KEY_FILE (пусто, если не заданы).
+# Команда «setting -getCert» печатает строки «cert: ...» и «key: ...» даже тогда, когда путей нет, поэтому берём то, что стоит после «cert:» / «key:».
+ssl_cert_read() {
+    local info
+    info=$("$DIR_PROJECT/$NAME_APP" setting -getCert 2>/dev/null)
+    SSL_CERT_FILE=$(echo "$info" | grep -Eo 'cert: .+' | awk '{print $2}' | head -n1)
+    SSL_KEY_FILE=$(echo "$info" | grep -Eo 'key: .+' | awk '{print $2}' | head -n1)
+}
+
 # Настроен ли SSL-сертификат в панели: код 0 — да, 1 — нет.
-# Команда панели «setting -getCert» печатает строки «cert: ...» и «key: ...» даже тогда, когда путей нет,
-# поэтому просто проверять, что вывод не пустой, нельзя: смотрим, что после «cert:» стоит значение.
 ssl_cert_configured() {
-    "$DIR_PROJECT/$NAME_APP" setting -getCert 2>/dev/null | grep -Eq 'cert: .+'
+    ssl_cert_read
+    [[ -n "$SSL_CERT_FILE" ]]
 }
 
 # Работает ли SSL-сертификат на самом деле: пути заданы в панели И файлы сертификата и ключа существуют. Код 0 — да.
 # Это важно: если пути заданы, а файлов нет, панель молча запускается по HTTP, хотя в настройках «сертификат есть».
 ssl_cert_files_ok() {
-    local info c k
-    info=$("$DIR_PROJECT/$NAME_APP" setting -getCert 2>/dev/null)
-    c=$(echo "$info" | grep -Eo 'cert: .+' | awk '{print $2}' | head -n1)
-    k=$(echo "$info" | grep -Eo 'key: .+' | awk '{print $2}' | head -n1)
-    [[ -n "$c" && -n "$k" && -f "$c" && -f "$k" ]]
+    ssl_cert_read
+    [[ -n "$SSL_CERT_FILE" && -n "$SSL_KEY_FILE" && -f "$SSL_CERT_FILE" && -f "$SSL_KEY_FILE" ]]
 }
 
 # Создаёт самоподписанный сертификат RSA 4096 для IP-адреса роутера в локальной сети (интерфейс br0)
@@ -1557,11 +1607,13 @@ ssl_make_self_signed() {
 # Вызывается при первой установке до запуска панели. В обычном режиме спрашивает подтверждение (по умолчанию — да),
 # в автоматическом создаёт сертификат без вопросов. Имя в сертификате — IP-адрес роутера в локальной сети.
 ssl_enable_self_signed() {
-    # Рабочий сертификат уже есть (например, его создали при настройке панели) — ничего не трогаем
-    if ssl_cert_files_ok; then
+    # Рабочий сертификат уже есть (например, его создали при настройке панели) — ничего не трогаем.
+    # Пути читаются один раз: повторный запуск программы панели здесь не нужен.
+    ssl_cert_read
+    if [[ -n "$SSL_CERT_FILE" && -n "$SSL_KEY_FILE" && -f "$SSL_CERT_FILE" && -f "$SSL_KEY_FILE" ]]; then
         return 0
     fi
-    if ssl_cert_configured; then
+    if [[ -n "$SSL_CERT_FILE" ]]; then
         logmsg "${color_yellow}${ICO_MAP[WAR]} В панели указан сертификат, но файлов по этим путям нет: без них HTTPS не работает.${style_plain}"
     fi
     confirm_options "Создать самоподписанный сертификат и включить HTTPS для панели (рекомендуется)" "y"
@@ -2483,14 +2535,8 @@ script_last_version() {
 }
 
 # Последняя версия панели 3x-ui на GitHub (MHSanaei/3x-ui), например v3.12.0.
-# Сначала по переадресации страницы «releases/latest» (не зависит от лимитов API), запасной способ — GitHub API.
 panel_last_version() {
-    local tag
-    tag=$(curl -4 -fsSL --max-time 6 -o /dev/null -w '%{url_effective}' "https://github.com/MHSanaei/3x-ui/releases/latest" 2>/dev/null | sed -n 's|.*/releases/tag/\(.*\)|\1|p')
-    if [[ -z "$tag" ]]; then
-        tag=$(curl -4 -fsSL --max-time 6 "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
-    fi
-    echo "$tag"
+    github_latest_tag MHSanaei/3x-ui 6
 }
 
 # Сравнивает два номера версии по числам (1.0.10 больше 1.0.9). Печатает 1, если первая версия новее, -1, если старее, 0, если равны.
@@ -2633,7 +2679,7 @@ else
 show_logo
     # Если панель установлена, заранее узнаём последние версии (из кэша или с GitHub) для цветных точек справа от версий
     local dot_script="" dot_panel=""
-    if [[ -f $DIR_PROJECT/$NAME_APP ]]; then
+    if [[ -f $DIR_PROJECT/$NAME_APP && "$CHECK_UPDATES" == true ]]; then
         load_latest_versions
         dot_script=" $(version_dot "$CURRENT_VERSION_SCRIPT" "$LATEST_SCRIPT")"
         dot_panel=" $(version_dot "$CURRENT_VERSION_ALL" "$LATEST_PANEL")"
