@@ -1,0 +1,29 @@
+# Автоматическая проверка репозитория при каждой загрузке (push) и pull request.
+# Если что-то не так, на странице репозитория появится красный крестик с описанием, какая проверка не прошла.
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Синтаксис скриптов
+        run: |
+          bash -n x-ui.sh
+          sh -n install-3xui-keenetic.sh
+
+      - name: shellcheck (только ошибки)
+        run: |
+          shellcheck -s bash -S error x-ui.sh
+          shellcheck -s sh -S error install-3xui-keenetic.sh
+
+      - name: Контрольная сумма x-ui.sh (файл x-ui.sh.sha256 должен совпадать с x-ui.sh)
+        run: sha256sum -c x-ui.sh.sha256
+
+      - name: Версия скрипта задана в формате 1.2.3
+        run: grep -E '^CURRENT_VERSION_SCRIPT="[0-9]+\.[0-9]+\.[0-9]+"$' x-ui.sh
