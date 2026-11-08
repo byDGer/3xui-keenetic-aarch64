@@ -6,16 +6,22 @@
 #    • устанавливает и обновляет панель 3x-ui (всегда последняя версия с GitHub MHSanaei/3x-ui);
 #    • включает HTTPS (самоподписанный сертификат) и умеет получать сертификат Let's Encrypt для вашего домена;
 #    • запускает/останавливает панель, включает автозапуск, меняет логин, пароль, порт;
-#    • делает резервные копии базы данных, выгружает её в json, обновляет geo-файлы;
-#    • показывает версии скрипта, панели и Xray с цветными точками: зелёная — самая свежая версия, жёлтая — есть обновление,
-#      красная — проверить не удалось; умеет обновлять только ядро Xray (XTLS/Xray-core);
-#    • обновляет сам себя из репозитория SCRIPT_REPO (см. CURRENT_VERSION_SCRIPT).
+#    • делает резервные копии базы данных (вручную, перед обновлением панели и по расписанию), выгружает её в json, обновляет geo-файлы;
+#    • показывает в шапке меню версии скрипта, панели и Xray с цветными точками (зелёная — самая свежая версия, жёлтая — есть обновление,
+#      красная — проверить не удалось), адрес панели, срок действия SSL-сертификата и предупреждение о неверном времени;
+#    • обновляет ядро Xray отдельно от панели (последняя или выбранная версия, откат на прежнюю);
+#    • Let's Encrypt для вашего домена: проверка по HTTP (порт 80) или через DNS-API провайдера, тестовый режим staging;
+#    • диагностика установки (doctor) и мастер доступа из интернета (remote_access);
+#    • команды для мониторинга и cron: status --json, update --check (коды возврата), backup_auto;
+#    • обновляет сам себя из репозитория SCRIPT_REPO (см. CURRENT_VERSION_SCRIPT) с проверкой контрольной суммы x-ui.sh.sha256.
 #
 #  Как запускать (на роутере, в Entware, от root):
 #    bash x-ui.sh                  — при первом запуске предложит выбор: автоматическая установка или самостоятельная настройка;
 #                                    после установки откроет меню управления (то же самое делает команда x-ui)
 #    x-ui <команда>                — выполнить команду без меню, например:
-#                                    start | stop | restart | status | enable | disable | view_panel | ssl | ssl_domain | ssl_remove | update | update_xray
+#                                    start | stop | restart | status | enable | disable | view_panel | ssl | ssl_domain | ssl_remove | update | update_xray |
+#                                    update_xray_custom | rollback_xray | backup_auto | backup_cron | doctor | remote_access
+#                                    x-ui status --json (состояние в JSON), x-ui update --check (коды: 0 — всё последнее, 10 — есть обновления, 2 — не удалось проверить)
 #    bash x-ui.sh auto_install     — автоматическая установка без вопросов
 #
 #  Где что лежит:
@@ -54,7 +60,7 @@ color_bgreen='\033[1;32m'
 declare -A ICO_MAP=( [GOOD]="[ ✔ ]" [BAD]="[ ✘ ]" [WORK]="[ ⚙ ]" [INF]="[INF]" [ERR]="[ERR]" [WAR]="[⚠️]" )
 
 # Версия этого скрипта. При выпуске обновления её нужно увеличить: по ней скрипт понимает, что на GitHub есть новая версия.
-CURRENT_VERSION_SCRIPT="1.0.5"
+CURRENT_VERSION_SCRIPT="1.1.0"
 # Репозиторий, из которого скрипт обновляет сам себя (ветка main).
 SCRIPT_REPO="byDGer/3xui-keenetic-aarch64"
 SCRIPT_RAW="https://raw.githubusercontent.com/$SCRIPT_REPO"
@@ -102,10 +108,12 @@ COMMANDS_CALL=""
 
 # Настройки скрипта (хранятся в /opt/etc/x-ui/config/settings и подхватываются при запуске):
 # DEBUG_SCRIPT — показывать цепочку вызовов функций, LOG_SCRIPT — вести журнал,
-# CHECK_UPDATES — проверять на GitHub наличие новых версий для цветных точек в шапке меню (false — не обращаться к сети при открытии меню).
+# CHECK_UPDATES — проверять на GitHub наличие новых версий для цветных точек в шапке меню (false — не обращаться к сети при открытии меню),
+# BACKUP_KEEP — сколько последних автоматических резервных копий базы хранить (остальные удаляются).
 DEBUG_SCRIPT=false
 LOG_SCRIPT=true
 CHECK_UPDATES=true
+BACKUP_KEEP=10
 # Переменные окружения, которые читает сама панель: где её ядро, база данных и журнал.
 XUI_BIN_FOLDER="$DIR_PROJECT/bin"
 XUI_DB_FOLDER="$DIR_DB"
@@ -138,6 +146,7 @@ else
 		echo -e "DEBUG_SCRIPT=\"$DEBUG_SCRIPT\"" >> "$DIR_CONFIG/settings"
 		echo -e "LOG_SCRIPT=\"$LOG_SCRIPT\"" >> "$DIR_CONFIG/settings"
 		echo -e "CHECK_UPDATES=\"$CHECK_UPDATES\"" >> "$DIR_CONFIG/settings"
+		echo -e "BACKUP_KEEP=\"$BACKUP_KEEP\"" >> "$DIR_CONFIG/settings"
 		echo -e "XUI_BIN_FOLDER=\"$XUI_BIN_FOLDER\"" >> "$DIR_CONFIG/settings"
 		echo -e "XUI_DB_FOLDER=\"$XUI_DB_FOLDER\"" >> "$DIR_CONFIG/settings"
 		echo -e "XUI_LOG_FOLDER=\"$XUI_LOG_FOLDER\"" >> "$DIR_CONFIG/settings"
@@ -426,6 +435,129 @@ xray_version() {
     echo "$v"
 }
 
+# Цветная точка статуса по названию цвета: green, yellow или red (зелёная — всё хорошо, жёлтая — внимание, красная — проблема).
+status_dot() {
+    case "$1" in
+        green)  echo -e "${color_green}●${style_plain}" ;;
+        yellow) echo -e "${color_yellow}●${style_plain}" ;;
+        *)      echo -e "${color_red}●${style_plain}" ;;
+    esac
+}
+
+# Читает из базы данных панели настройки доступа одним запросом sqlite3 (программа панели для этого не запускается — это быстрее):
+# PANEL_PORT, PANEL_PATH, PANEL_LISTEN (адрес прослушивания), PANEL_CERT и PANEL_KEY (пути к сертификату и ключу).
+# Возвращает 1, если базы или sqlite3 нет (тогда строки с адресом и сертификатом в шапке не показываются).
+panel_settings_read() {
+    PANEL_PORT=""
+    PANEL_PATH=""
+    PANEL_LISTEN=""
+    PANEL_CERT=""
+    PANEL_KEY=""
+    [[ -f "$DB" ]] && command -v sqlite3 >/dev/null 2>&1 || return 1
+    local k v
+    while IFS='|' read -r k v; do
+        case "$k" in
+            webPort)     PANEL_PORT="$v" ;;
+            webBasePath) PANEL_PATH="$v" ;;
+            webListen)   PANEL_LISTEN="$v" ;;
+            webCertFile) PANEL_CERT="$v" ;;
+            webKeyFile)  PANEL_KEY="$v" ;;
+        esac
+    done < <(sqlite3 -readonly "$DB" "SELECT key, value FROM settings WHERE key IN ('webPort','webBasePath','webListen','webCertFile','webKeyFile');" 2>/dev/null)
+    PANEL_PORT="${PANEL_PORT:-2053}"
+    PANEL_PATH="${PANEL_PATH:-/}"
+    return 0
+}
+
+# Переводит дату UTC в секунды от 1970 года без запуска внешних программ (busybox date не понимает формат openssl).
+# Параметры: год месяц день час минута секунда. Результат — в переменной UTC_EPOCH.
+utc_epoch() {
+    local y=$1 m=$((10#$2)) d=$((10#$3)) hh=$((10#$4)) mm=$((10#$5)) ss=$((10#$6))
+    (( m <= 2 )) && y=$((y - 1))
+    local era=$(( (y >= 0 ? y : y - 399) / 400 ))
+    local yoe=$(( y - era * 400 ))
+    local mp=$(( (m + 9) % 12 ))
+    local doy=$(( (153 * mp + 2) / 5 + d - 1 ))
+    local doe=$(( yoe * 365 + yoe / 4 - yoe / 100 + doy ))
+    UTC_EPOCH=$(( (era * 146097 + doe - 719468) * 86400 + hh * 3600 + mm * 60 + ss ))
+}
+
+# Момент окончания сертификата (секунды от 1970 года, UTC). Параметр 1 — файл сертификата. Печатает число или ничего, если прочитать не удалось.
+# Читать сертификат командой openssl при каждом открытии меню долго, поэтому результат кэшируется в $DIR_CACHE/cert_expiry
+# и перечитывается, только если изменился путь к файлу или сам файл (он новее кэша).
+cert_expiry_epoch() {
+    local file="$1" cache="$DIR_CACHE/cert_expiry" cpath cexp out mon day tm year
+    [[ -f "$file" ]] || return 1
+    if [[ -f "$cache" && ! "$file" -nt "$cache" ]]; then
+        IFS='|' read -r cpath cexp < "$cache"
+        if [[ "$cpath" == "$file" && -n "$cexp" ]]; then
+            echo "$cexp"
+            return 0
+        fi
+    fi
+    out=$(openssl x509 -enddate -noout -in "$file" 2>/dev/null)
+    [[ "$out" == notAfter=* ]] || return 1
+    # Формат: notAfter=Nov  5 12:00:00 2028 GMT
+    read -r mon day tm year _ <<< "${out#notAfter=}"
+    local months=" Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec" pre
+    pre="${months%% $mon*}"
+    [[ "$months" == *" $mon"* ]] || return 1
+    local mnum=$(( $(wc -w <<< "$pre") + 1 ))
+    IFS=: read -r hh mi ss <<< "$tm"
+    utc_epoch "$year" "$mnum" "$day" "$hh" "$mi" "$ss"
+    mkdir -p "$DIR_CACHE"
+    echo "$file|$UTC_EPOCH" > "$cache"
+    echo "$UTC_EPOCH"
+}
+
+# Печатает строки шапки главного меню: адрес панели и состояние SSL-сертификата (с цветной точкой).
+# Данные берутся из базы панели (panel_settings_read); если базы или sqlite3 нет, ничего не печатает.
+# Точка у сертификата: зелёная — осталось больше 30 дней, жёлтая — 30 дней и меньше, красная — истёк, не читается или нет файлов.
+# Всегда возвращает 0, чтобы не обрывать цепочку команд в show_main_menu.
+show_panel_info() {
+    panel_settings_read || return 0
+    local https=0 host="$PANEL_LISTEN" scheme="http"
+    [[ -z "$host" || "$host" == "0.0.0.0" ]] && host="$(lan_ip)"
+    if [[ -n "$PANEL_CERT" && -n "$PANEL_KEY" && -f "$PANEL_CERT" && -f "$PANEL_KEY" ]]; then
+        https=1
+        scheme="https"
+    fi
+    echo -e "Адрес панели:    ${scheme}://${host:-<IP роутера>}:${PANEL_PORT}${PANEL_PATH}"
+    if [[ -z "$PANEL_CERT" ]]; then
+        echo -e "SSL-сертификат:  не используется (панель по HTTP)"
+    elif [[ $https -eq 0 ]]; then
+        echo -e "SSL-сертификат:  файлы не найдены, панель работает по HTTP $(status_dot red)"
+    else
+        local exp now days
+        exp=$(cert_expiry_epoch "$PANEL_CERT")
+        printf -v now '%(%s)T' -1
+        if [[ -z "$exp" ]]; then
+            echo -e "SSL-сертификат:  срок действия не определён $(status_dot red)"
+        else
+            days=$(( (exp - now) / 86400 ))
+            if (( exp <= now )); then
+                echo -e "SSL-сертификат:  истёк $(status_dot red)"
+            elif (( days <= 30 )); then
+                echo -e "SSL-сертификат:  осталось $days дн. $(status_dot yellow)"
+            else
+                echo -e "SSL-сертификат:  осталось $days дн. $(status_dot green)"
+            fi
+        fi
+    fi
+    return 0
+}
+
+# Печатает красное предупреждение, если системное время роутера явно неверное (год раньше 2025).
+# С неверным временем не работают HTTPS и выпуск сертификатов Let's Encrypt. Всегда возвращает 0.
+show_time_warning() {
+    local year
+    printf -v year '%(%Y)T' -1
+    if (( year < 2025 )); then
+        echo -e "${color_red}Время на роутере неверно (год $year): HTTPS и сертификаты работать не будут. Проверьте синхронизацию времени.${style_plain}"
+    fi
+    return 0
+}
+
 # Печатает строку «Версия XRay:  x.x.x ●» для шапки главного меню (точка — статус версии, см. version_dot).
 # Всегда возвращает 0, чтобы не обрывать цепочку команд в show_main_menu.
 show_xray_version() {
@@ -459,40 +591,23 @@ xray_zip_name() {
     esac
 }
 
-# Пункт меню «Обновить только XRay»: обновляет ядро Xray до последней версии с GitHub (XTLS/Xray-core).
-# Панель, настройки, клиенты и база данных не затрагиваются. Порядок действий:
-#   1) сравнить установленную версию с последней;  2) скачать архив и проверить контрольную сумму SHA-256;
-#   3) распаковать и пробно запустить новое ядро;  4) остановить панель, заменить файл ядра (старый сохраняется как .bak);
-#   5) запустить панель снова (если она работала до обновления).
-update_xray() {
-    check_install || return 1
+# Устанавливает ядро Xray указанной версии. Параметр 1 — тег релиза на GitHub (например, v25.8.3).
+# Порядок действий: скачать архив, проверить контрольную сумму SHA-256, распаковать, пробно запустить новое ядро,
+# остановить панель, заменить файл ядра (прежнее сохраняется как .bak), запустить панель снова (если она работала).
+# Общая часть для пунктов «Обновить только XRay» и «Установить свою версию XRay».
+xray_install_tag() {
+    local last="$1" bin cur
     check_architecture 1
     if ! xray_zip_name; then
         logmsg "${color_red}${ICO_MAP[ERR]} Для архитектуры $ARCHITECTURE нет готового ядра Xray.${style_plain}"
         return 1
     fi
-    local bin cur last
     bin=$(xray_bin_path)
     if [[ -z "$bin" ]]; then
         logmsg "${color_red}${ICO_MAP[ERR]} Файл ядра Xray не найден в $DIR_PROJECT/bin${style_plain}"
         return 1
     fi
     cur=$(xray_version)
-    logmsg "${color_green}${ICO_MAP[WORK]} Проверка последней версии XRay на GitHub (XTLS/Xray-core)...${style_plain}"
-    last=$(xray_last_version)
-    if [[ -z "$last" ]]; then
-        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось получить версию XRay, попробуйте позже${style_plain}"
-        return 1
-    fi
-    if [[ "${last#v}" == "$cur" ]]; then
-        logmsg "${color_green}Установлена последняя версия XRay: ${cur}${style_plain}"
-        confirm_options "Переустановить XRay принудительно" "n"
-        [[ $? == 0 ]] || return 0
-    else
-        logmsg "${color_yellow}Доступна новая версия XRay: ${last#v}, у вас: ${cur:-неизвестно}${style_plain}"
-        confirm_options "Обновить XRay до ${last#v} (панель и настройки не пострадают). Продолжить" "y"
-        [[ $? == 0 ]] || return 0
-    fi
 
     # Для распаковки архива нужна программа unzip
     if ! command -v unzip >/dev/null 2>&1; then
@@ -576,6 +691,116 @@ update_xray() {
     logmsg "${color_green}Сейчас установлена версия XRay: $(xray_version)${style_plain}"
 }
 
+# Пункт меню «Обновить только XRay»: обновляет ядро Xray до последней версии с GitHub (XTLS/Xray-core).
+# Панель, настройки, клиенты и база данных не затрагиваются. Порядок действий:
+#   1) сравнить установленную версию с последней;  2) скачать архив и проверить контрольную сумму SHA-256;
+#   3) распаковать и пробно запустить новое ядро;  4) остановить панель, заменить файл ядра (старый сохраняется как .bak);
+#   5) запустить панель снова (если она работала до обновления).
+update_xray() {
+    check_install || return 1
+    check_architecture 1
+    if ! xray_zip_name; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Для архитектуры $ARCHITECTURE нет готового ядра Xray.${style_plain}"
+        return 1
+    fi
+    local bin cur last
+    bin=$(xray_bin_path)
+    if [[ -z "$bin" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Файл ядра Xray не найден в $DIR_PROJECT/bin${style_plain}"
+        return 1
+    fi
+    cur=$(xray_version)
+    logmsg "${color_green}${ICO_MAP[WORK]} Проверка последней версии XRay на GitHub (XTLS/Xray-core)...${style_plain}"
+    last=$(xray_last_version)
+    if [[ -z "$last" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось получить версию XRay, попробуйте позже${style_plain}"
+        return 1
+    fi
+    if [[ "${last#v}" == "$cur" ]]; then
+        logmsg "${color_green}Установлена последняя версия XRay: ${cur}${style_plain}"
+        confirm_options "Переустановить XRay принудительно" "n"
+        [[ $? == 0 ]] || return 0
+    else
+        logmsg "${color_yellow}Доступна новая версия XRay: ${last#v}, у вас: ${cur:-неизвестно}${style_plain}"
+        confirm_options "Обновить XRay до ${last#v} (панель и настройки не пострадают). Продолжить" "y"
+        [[ $? == 0 ]] || return 0
+    fi
+    xray_install_tag "$last"
+}
+
+# Пункт меню «Установить свою версию XRay»: ставит выбранную версию ядра (в том числе более старую, если новая не подошла).
+# Версию вводит пользователь (например, 25.8.3). Архив берётся из релизов XTLS/Xray-core; если такой версии нет, скачивание не удастся,
+# и старое ядро останется на месте. Проверка контрольной суммы и пробный запуск те же, что при обычном обновлении.
+update_xray_custom() {
+    check_install || return 1
+    check_architecture 1
+    if ! xray_zip_name; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Для архитектуры $ARCHITECTURE нет готового ядра Xray.${style_plain}"
+        return 1
+    fi
+    local cur v
+    cur=$(xray_version)
+    confirm_options "Введите версию XRay (например, 25.8.3), сейчас стоит ${cur:-неизвестная}" "" "xray_custom_version" $color_cyan
+    v="${map_confirm[xray_custom_version]}"
+    v="${v#v}"
+    if [[ ! "$v" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Неверный номер версии: '$v'. Нужен вид 25.8.3.${style_plain}"
+        return 1
+    fi
+    if [[ "$v" == "$cur" ]]; then
+        logmsg "${color_yellow}Версия XRay $v уже установлена.${style_plain}"
+        confirm_options "Переустановить принудительно" "n"
+        [[ $? == 0 ]] || return 0
+    else
+        confirm_options "Установить XRay $v вместо ${cur:-текущей}" "y"
+        [[ $? == 0 ]] || return 0
+    fi
+    xray_install_tag "v$v"
+}
+
+# Пункт меню «Откатить XRay»: меняет местами текущее ядро и сохранённое прежнее (файл .bak, он остаётся после каждого обновления).
+# Повторный откат возвращает всё назад. Панель на время замены останавливается и запускается снова, если она работала.
+rollback_xray() {
+    check_install || return 1
+    local bin bak cur prev was_running=0
+    bin=$(xray_bin_path)
+    if [[ -z "$bin" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Файл ядра Xray не найден в $DIR_PROJECT/bin${style_plain}"
+        return 1
+    fi
+    bak="$bin.bak"
+    if [[ ! -f "$bak" ]]; then
+        logmsg "${color_yellow}${ICO_MAP[WAR]} Прежняя версия не сохранена ($bak): откатывать нечего. Копия появляется после обновления XRay.${style_plain}"
+        return 1
+    fi
+    cur=$(xray_version)
+    prev=$("$bak" -version 2>/dev/null | head -n1 | awk '{print $2}')
+    if [[ -z "$prev" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Прежнее ядро ($bak) не запускается, откат отменён.${style_plain}"
+        return 1
+    fi
+    confirm_options "Вернуть XRay $prev (сейчас стоит ${cur:-неизвестная})" "y"
+    [[ $? == 0 ]] || return 0
+    check_status
+    [[ $? == 0 ]] && was_running=1
+    if [[ $was_running == 1 ]]; then
+        stop
+    fi
+    pkill -f "$DIR_PROJECT/bin/xray-linux" 2>/dev/null
+    # Меняем файлы местами через временное имя
+    if mv -f "$bin" "$bin.swap" && mv -f "$bak" "$bin" && mv -f "$bin.swap" "$bak"; then
+        rm -f "$DIR_CACHE/xray_version"
+        logmsg "${color_green}${ICO_MAP[INF]} Откат выполнен: ${cur:-?} → ${prev}. Прежняя версия сохранена как $bak (повторный откат вернёт её обратно).${style_plain}"
+    else
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось поменять файлы ядра местами. Проверьте каталог $DIR_PROJECT/bin${style_plain}"
+    fi
+    if [[ $was_running == 1 ]]; then
+        start
+    fi
+    logmsg "${color_green}Сейчас установлена версия XRay: $(xray_version)${style_plain}"
+}
+
+
 # Сравнивает установленную версию панели с последней на GitHub (MHSanaei/3x-ui).
 # Если вышла новая — предлагает переустановить панель (данные сохраняются).
 update_panel(){
@@ -630,7 +855,12 @@ update_all(){
 }
 
 # Меню обновления: всё сразу / только скрипт / только панель / только XRay.
+# С параметром --check (x-ui update --check) вместо меню просто проверяет наличие новых версий (см. check_updates).
 update(){
+    if [[ "$1" == "--check" ]]; then
+        check_updates
+        return $?
+    fi
     check_install
     menu_choice menu_update "$1" "Выберите действие обновления"
     safe_call_function "$schoice"
@@ -723,6 +953,10 @@ install() {
     fi
     # Каталог new — метка «только что установлено». Если её нет, это обновление: останавливаем панель и чистим кэш.
     if [[ ! -d "$DIR_PROJECT/new" ]]; then
+        # Перед обновлением панели делаем автоматическую копию базы данных (на случай, если новая версия что-то испортит)
+        if [[ $1 == "$NAME_APP" && -f "$DB" ]]; then
+            backup_auto "перед установкой панели"
+        fi
         check_status
         if [[ $? == 0 ]]; then
             $SHELL_SHORT_NAME stop 1
@@ -814,6 +1048,22 @@ install() {
             rm -f "$DIR_TMP/$SHELL_SHORT_NAME-script.new"
             SCRIPT_REF=""
             return
+        fi
+        # Проверка контрольной суммы: рядом со скриптом в репозитории лежит файл x-ui.sh.sha256.
+        # Если суммы нет (например, свой источник), только предупреждаем; если есть и не совпала — файл не устанавливаем.
+        local expected actual
+        expected=$(curl -4 -fsSL --max-time 10 "${url}.sha256" 2>/dev/null | awk '{print $1}' | head -n1)
+        if [[ -n "$expected" ]] && command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$DIR_TMP/$SHELL_SHORT_NAME-script.new" | awk '{print $1}')
+            if [[ "$actual" != "$expected" ]]; then
+                logmsg "${color_red}${ICO_MAP[ERR]} Контрольная сумма скрипта не совпала, обновление отменено. Если файлы в репозитории только что обновлены, подождите 5 минут (кэш GitHub) и повторите.${style_plain}"
+                rm -f "$DIR_TMP/$SHELL_SHORT_NAME-script.new"
+                SCRIPT_REF=""
+                return
+            fi
+            logmsg "${color_green}${ICO_MAP[INF]} Контрольная сумма скрипта совпала.${style_plain}"
+        else
+            logmsg "${color_yellow}${ICO_MAP[WAR]} Контрольную сумму скрипта проверить не удалось (нет файла .sha256 или программы sha256sum): продолжаю без проверки.${style_plain}"
         fi
         mv -f -- "$DIR_TMP/$SHELL_SHORT_NAME-script.new" $DIR_PROJECT_SHELL_SCRIPTS
         chmod +x $DIR_PROJECT_SHELL_SCRIPTS
@@ -1036,7 +1286,7 @@ confirm_options() {
     local confirm_type=""
     # Цвет текста вопроса (по умолчанию пурпурный).
     local txtcolor=${4:-$color_magenta}
-    [[ "$3" == "config_password" ]] || logmsg "question: $question, default: $default, confirm_type: $confirm_type, txtcolor: $txtcolor" nolog
+    [[ "$3" == "config_password" || "$3" == "ssl_dns_var" ]] || logmsg "question: $question, default: $default, confirm_type: $confirm_type, txtcolor: $txtcolor" nolog
     [[ "$AUTO_MODE" == "1" ]] || echo ""
     # Третий параметр не задан — это вопрос «да/нет». Задан — нужно ввести значение, оно сохранится в map_confirm[$3].
     if [[ -z "$3" ]]; then
@@ -1061,7 +1311,7 @@ confirm_options() {
     else
         echo -n -e "${txtcolor}$question $confirm_type?:${style_plain} " && read -r -p " " temp
     fi
-    [[ "$3" == "config_password" ]] || logmsg "Choice: $temp" nolog
+    [[ "$3" == "config_password" || "$3" == "ssl_dns_var" ]] || logmsg "Choice: $temp" nolog
     if [[ -n "$confirm_type" ]]; then
         # Согласием считаем ответы y, yes, д, да (в любом регистре).
         case "$temp" in
@@ -1364,13 +1614,18 @@ check() {
 	status
 }
 
-# Печатает, работает панель или остановлена.
+# Печатает, работает панель или остановлена. С параметром --json (x-ui status --json) печатает состояние в формате JSON
+# для мониторинга и скриптов (см. status_json). Код возврата 0, если панель работает.
 status() {
-	if check_panel; then
-    logmsg "${ICO_MAP[GOOD]}  $SHELL_SHORT_NAME работает"
-	else
-    logmsg "${ICO_MAP[GOOD]}  $SHELL_SHORT_NAME остановлен"
-	fi
+    if [[ "$1" == "--json" ]]; then
+        status_json
+        return $?
+    fi
+    if check_panel; then
+        logmsg "${ICO_MAP[GOOD]}  $SHELL_SHORT_NAME работает"
+    else
+        logmsg "${ICO_MAP[GOOD]}  $SHELL_SHORT_NAME остановлен"
+    fi
 }
 
 # Включает автозапуск: создаёт ссылку /opt/etc/init.d/S99x-ui на этот скрипт.
@@ -1640,8 +1895,12 @@ acme_run() {
 }
 
 # Скачивает и устанавливает acme.sh в /opt/etc/acme.sh (последний релиз с GitHub, запасной вариант — ветка master).
+# Параметр 1: слово dns — дополнительно поставить каталог dnsapi (модули для выпуска сертификата через API DNS-провайдера, ~1 МБ).
+# Если нужное уже установлено, ничего не скачивает.
 acme_install() {
-    if [[ -f "$DIR_ACME/acme.sh" ]]; then
+    local need_dns=0
+    [[ "$1" == "dns" ]] && need_dns=1
+    if [[ -f "$DIR_ACME/acme.sh" && ( $need_dns -eq 0 || -d "$DIR_ACME/dnsapi" ) ]]; then
         return 0
     fi
     logmsg "${color_green}${ICO_MAP[WORK]} Устанавливаю acme.sh...${style_plain}"
@@ -1659,15 +1918,27 @@ acme_install() {
         rm -rf "$src" "$archive"
         return 1
     fi
-    cp "$src/acme.sh" "$DIR_ACME/acme.sh"
-    # на Entware нет /usr/bin/env, поэтому прописываем интерпретатор явно
-    sed -i "1s|^#!.*|#!$(command -v sh)|" "$DIR_ACME/acme.sh"
-    chmod 700 "$DIR_ACME/acme.sh"
+    if [[ ! -f "$DIR_ACME/acme.sh" ]]; then
+        cp "$src/acme.sh" "$DIR_ACME/acme.sh"
+        # на Entware нет /usr/bin/env, поэтому прописываем интерпретатор явно
+        sed -i "1s|^#!.*|#!$(command -v sh)|" "$DIR_ACME/acme.sh"
+        chmod 700 "$DIR_ACME/acme.sh"
+    fi
+    if [[ $need_dns -eq 1 ]]; then
+        if [[ ! -d "$src/dnsapi" ]]; then
+            logmsg "${color_red}${ICO_MAP[ERR]} В архиве acme.sh нет каталога dnsapi.${style_plain}"
+            rm -rf "$src" "$archive"
+            return 1
+        fi
+        rm -rf "$DIR_ACME/dnsapi"
+        cp -r "$src/dnsapi" "$DIR_ACME/dnsapi"
+    fi
     rm -rf "$src" "$archive"
 }
 
 # Пункт меню: получить настоящий бесплатный сертификат Let's Encrypt для вашего домена.
-# Требования: домен указывает на внешний IP роутера, порт 80 свободен и открыт из интернета.
+# Два метода проверки домена: HTTP (домен указывает на внешний IP роутера, порт 80 свободен и открыт из интернета)
+# или DNS через API вашего DNS-провайдера (порт 80 и публичный IP не нужны). Есть тестовый режим staging без лимитов.
 # Скрипт проверяет домен, ставит acme.sh, получает сертификат, настраивает автопродление (cron)
 # и по желанию применяет сертификат к панели.
 ssl_domain() {
@@ -1695,37 +1966,78 @@ ssl_domain() {
         return 1
     fi
 
-    # --- проверки (только предупреждения) ---
-    local resolved public
-    resolved=$(nslookup "$domain" 2>/dev/null | grep '^Address' | grep -v '#' | grep -Eo '([0-9]+\.){3}[0-9]+' | tail -n1)
-    public=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null)
-    if [[ -z "$resolved" ]]; then
-        logmsg "${color_yellow}${ICO_MAP[WAR]} Не удалось определить IP-адрес домена $domain. Проверьте, что DNS-запись создана.${style_plain}"
-        confirm_options "Всё равно продолжить" "n"
-        [[ $? == 0 ]] || return 1
-    elif [[ -n "$public" && "$resolved" != "$public" ]]; then
-        logmsg "${color_yellow}${ICO_MAP[WAR]} Домен указывает на $resolved, а внешний IP роутера: $public. Выпуск может не пройти.${style_plain}"
-        confirm_options "Всё равно продолжить" "n"
-        [[ $? == 0 ]] || return 1
+    # --- метод проверки домена и тестовый режим ---
+    local method="http" server="letsencrypt" staging=0 dns_provider="" apply_default="y"
+    confirm_options "Метод проверки домена: 1 — HTTP на порту 80 (нужен открытый порт 80), 2 — DNS через API вашего DNS-провайдера (порт 80 не нужен)" "1" "ssl_method" $color_cyan
+    [[ "${map_confirm[ssl_method]}" == "2" ]] && method="dns"
+    confirm_options "Тестовый режим Let's Encrypt (staging): без лимитов на число попыток, но браузеры такой сертификат не примут. Включить" "n"
+    if [[ $? == 0 ]]; then
+        staging=1
+        server="letsencrypt_test"
+        apply_default="n"
     fi
-    if command -v netstat >/dev/null 2>&1 && netstat -ltn 2>/dev/null | grep -Eq '[:.]80[[:space:]]'; then
-        logmsg "${color_yellow}${ICO_MAP[WAR]} Порт 80 на роутере уже занят (например, веб-интерфейсом роутера). acme.sh не сможет его использовать.${style_plain}"
-        confirm_options "Всё равно продолжить" "n"
-        [[ $? == 0 ]] || return 1
+
+    if [[ "$method" == "dns" ]]; then
+        # Для проверки через DNS acme.sh добавляет TXT-запись в вашей DNS-зоне через API провайдера: нужны код провайдера и ключи доступа.
+        echo -e "Для проверки через DNS нужны код вашего DNS-провайдера в acme.sh и ключи доступа к его API."
+        echo -e "Например, для Cloudflare: код dns_cf, переменная CF_Token=<токен>. Список провайдеров и нужных переменных:"
+        echo -e "https://github.com/acmesh-official/acme.sh/wiki/dnsapi"
+        confirm_options "Код DNS-провайдера (например, dns_cf)" "" "ssl_dns_provider" $color_cyan
+        dns_provider="${map_confirm[ssl_dns_provider]}"
+        if [[ ! "$dns_provider" =~ ^dns_[a-z0-9_]+$ ]]; then
+            logmsg "${color_red}${ICO_MAP[ERR]} Неверный код провайдера: '$dns_provider'. Нужен вид dns_cf.${style_plain}"
+            return 1
+        fi
+        # Переменные доступа вводятся строками вида ИМЯ=значение до пустой строки. Они передаются acme.sh и сохраняются им для продления.
+        local dns_line
+        while true; do
+            confirm_options "Переменная доступа к API (ИМЯ=значение), пустая строка — закончить ввод" "" "ssl_dns_var" $color_cyan
+            dns_line="${map_confirm[ssl_dns_var]}"
+            [[ -z "$dns_line" ]] && break
+            if [[ "$dns_line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.+)$ ]]; then
+                export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+            else
+                logmsg "${color_yellow}${ICO_MAP[WAR]} Нужен вид ИМЯ=значение (например, CF_Token=abc123).${style_plain}"
+            fi
+        done
+    else
+        # --- проверки для метода HTTP (только предупреждения) ---
+        local resolved public
+        resolved=$(nslookup "$domain" 2>/dev/null | grep '^Address' | grep -v '#' | grep -Eo '([0-9]+\.){3}[0-9]+' | tail -n1)
+        public=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null)
+        if [[ -z "$resolved" ]]; then
+            logmsg "${color_yellow}${ICO_MAP[WAR]} Не удалось определить IP-адрес домена $domain. Проверьте, что DNS-запись создана.${style_plain}"
+            confirm_options "Всё равно продолжить" "n"
+            [[ $? == 0 ]] || return 1
+        elif [[ -n "$public" && "$resolved" != "$public" ]]; then
+            logmsg "${color_yellow}${ICO_MAP[WAR]} Домен указывает на $resolved, а внешний IP роутера: $public. Выпуск может не пройти.${style_plain}"
+            confirm_options "Всё равно продолжить" "n"
+            [[ $? == 0 ]] || return 1
+        fi
+        if command -v netstat >/dev/null 2>&1 && netstat -ltn 2>/dev/null | grep -Eq '[:.]80[[:space:]]'; then
+            logmsg "${color_yellow}${ICO_MAP[WAR]} Порт 80 на роутере уже занят (например, веб-интерфейсом роутера). acme.sh не сможет его использовать.${style_plain}"
+            confirm_options "Всё равно продолжить" "n"
+            [[ $? == 0 ]] || return 1
+        fi
     fi
 
     # --- зависимости и acme.sh ---
     logmsg "${color_green}${ICO_MAP[WORK]} Устанавливаю зависимости...${style_plain}"
-    opkg install curl tar openssl-util ca-certificates socat >/dev/null 2>&1
-    if ! command -v socat >/dev/null 2>&1; then
-        opkg update >/dev/null 2>&1
+    if [[ "$method" == "dns" ]]; then
+        opkg install curl tar openssl-util ca-certificates >/dev/null 2>&1
+        acme_install dns || return 1
+    else
         opkg install curl tar openssl-util ca-certificates socat >/dev/null 2>&1
+        if ! command -v socat >/dev/null 2>&1; then
+            opkg update >/dev/null 2>&1
+            opkg install curl tar openssl-util ca-certificates socat >/dev/null 2>&1
+        fi
+        if ! command -v socat >/dev/null 2>&1; then
+            logmsg "${color_red}${ICO_MAP[ERR]} Не удалось установить socat (он нужен acme.sh для проверки по порту 80).${style_plain}"
+            return 1
+        fi
+        acme_install || return 1
     fi
-    if ! command -v socat >/dev/null 2>&1; then
-        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось установить socat (он нужен acme.sh для проверки по порту 80).${style_plain}"
-        return 1
-    fi
-    acme_install || return 1
 
     # --- выпуск ---
     local force=""
@@ -1734,12 +2046,21 @@ ssl_domain() {
         [[ $? == 0 ]] && force="--force"
     fi
     logmsg "${color_green}${ICO_MAP[WORK]} Запрашиваю сертификат для $domain...${style_plain}"
-    acme_run --issue --standalone --httpport 80 -d "$domain" --server letsencrypt --log "$DIR_ACME/acme.sh.log" $force
+    if [[ "$method" == "dns" ]]; then
+        acme_run --issue --dns "$dns_provider" -d "$domain" --server "$server" --log "$DIR_ACME/acme.sh.log" $force
+    else
+        acme_run --issue --standalone --httpport 80 -d "$domain" --server "$server" --log "$DIR_ACME/acme.sh.log" $force
+    fi
     local rc=$?
     if [[ $rc -ne 0 && $rc -ne 2 ]]; then
         logmsg "${color_red}${ICO_MAP[ERR]} Не удалось получить сертификат (код $rc).${style_plain}"
-        echo -e "  Частые причины: порт 80 закрыт или занят, домен указывает не на этот роутер,"
-        echo -e "  у провайдера нет публичного IP-адреса, превышен лимит запросов Let's Encrypt."
+        if [[ "$method" == "dns" ]]; then
+            echo -e "  Частые причины: неверные ключи API или код провайдера, домен не входит в аккаунт провайдера,"
+            echo -e "  не успела обновиться DNS-запись, превышен лимит запросов Let's Encrypt."
+        else
+            echo -e "  Частые причины: порт 80 закрыт или занят, домен указывает не на этот роутер,"
+            echo -e "  у провайдера нет публичного IP-адреса, превышен лимит запросов Let's Encrypt."
+        fi
         echo -e "  Подробности: $DIR_ACME/acme.sh.log"
         return 1
     fi
@@ -1775,7 +2096,10 @@ ssl_domain() {
     fi
 
     # --- применение к панели ---
-    confirm_options "Применить сертификат к панели" "y"
+    if [[ $staging -eq 1 ]]; then
+        logmsg "${color_yellow}${ICO_MAP[WAR]} Это ТЕСТОВЫЙ сертификат: браузеры ему не доверяют. Для настоящего повторите выпуск без тестового режима (ответьте «да» на вопрос о принудительном выпуске).${style_plain}"
+    fi
+    confirm_options "Применить сертификат к панели" "$apply_default"
     if [[ $? == 0 ]]; then
         "$DIR_PROJECT/$NAME_APP" cert -webCert "$DIR_CERT/$domain/fullchain.pem" -webCertKey "$DIR_CERT/$domain/privkey.pem"
         restart
@@ -1836,9 +2160,11 @@ ssl_remove() {
     view_panel
 }
 
-# Работает ли панель: ищет запущенный процесс xui. Код 0 — работает.
+# Работает ли панель: ищет запущенный процесс с именем xui. Код 0 — работает.
+# Ищется точное имя процесса (pgrep -x), а не любая строка xui в командной строке: иначе «работающей» считалась бы и сторонняя программа,
+# у которой в параметрах встретилось xui.
 check_panel() {
-    pgrep -f $NAME_APP > /dev/null
+    pgrep -x "$NAME_APP" > /dev/null
 }
 
 # Печатает слово enabled, если автозапуск включён (есть ссылка в /opt/etc/init.d).
@@ -1976,6 +2302,68 @@ delete_old_backups(){
         else
             logmsg "${color_red}${ICO_MAP[ERR]} Введено неверное число!${style_plain}"
         fi	
+    fi
+}
+
+# Автоматическая резервная копия базы данных без вопросов: её вызывают cron (команда x-ui backup_auto) и установка панели перед обновлением.
+# Параметр 1 — причина (попадает в сообщение). Файл: /opt/etc/x-ui/backup/db/auto_ГГГГ_ММ_ДД_чч_мм_сс.db.gz (без gzip — .db).
+# Копия делается командой sqlite3 .backup: это целостный снимок, даже если панель в этот момент пишет в базу (без sqlite3 — обычное копирование).
+# Хранятся последние BACKUP_KEEP автоматических копий, ручные копии (меню «Управление резервными копиями») не трогаются.
+# Восстановить копию можно тем же пунктом меню, что и ручную.
+backup_auto() {
+    local reason="${1:-по расписанию}" dir="$DIR_PROJECT/backup/db" now out tmp keep old
+    if [[ ! -f "$DB" ]]; then
+        logmsg "${color_yellow}${ICO_MAP[WAR]} Базы данных нет: резервная копия не создана.${style_plain}"
+        return 1
+    fi
+    mkdir -p "$dir"
+    printf -v now '%(%Y_%m_%d_%H_%M_%S)T' -1
+    tmp="$dir/.auto_$now.tmp"
+    if ! { command -v sqlite3 >/dev/null 2>&1 && sqlite3 "$DB" ".backup '$tmp'" 2>/dev/null; }; then
+        cp -f "$DB" "$tmp" || return 1
+    fi
+    if command -v gzip >/dev/null 2>&1 && gzip -c "$tmp" > "$dir/auto_$now.db.gz"; then
+        out="$dir/auto_$now.db.gz"
+        rm -f "$tmp"
+    else
+        out="$dir/auto_$now.db"
+        mv -f "$tmp" "$out"
+    fi
+    chmod 600 "$out"
+    # Оставляем только последние BACKUP_KEEP автоматических копий
+    keep="${BACKUP_KEEP:-10}"
+    [[ "$keep" =~ ^[0-9]+$ ]] || keep=10
+    ls -1t "$dir"/auto_* 2>/dev/null | tail -n +$((keep + 1)) | while IFS= read -r old; do
+        rm -f "$old"
+    done
+    logmsg "${color_green}${ICO_MAP[INF]} Резервная копия базы создана ($reason): $out${style_plain}"
+}
+
+# Пункт меню: включить или выключить автоматические резервные копии по расписанию (cron).
+# Расписание: раз в неделю, по воскресеньям в 04:30; хранятся последние BACKUP_KEEP копий (см. backup_auto).
+# Нужен планировщик cron (в Entware пакет cron) и запущенная служба cron.
+backup_cron() {
+    if ! command -v crontab >/dev/null 2>&1; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Нет планировщика cron. Установите его: opkg install cron${style_plain}"
+        return 1
+    fi
+    local line="30 4 * * 0 PATH=$DIR_ENTWARE/sbin:$DIR_ENTWARE/bin:\$PATH $DIR_ENTWARE/bin/bash $DIR_PROJECT_SHELL_SCRIPTS backup_auto >/dev/null 2>&1"
+    if crontab -l 2>/dev/null | grep -q 'backup_auto'; then
+        logmsg "${color_green}${ICO_MAP[INF]} Автоматические копии включены (по воскресеньям в 04:30).${style_plain}"
+        confirm_options "Выключить автоматические копии" "n"
+        if [[ $? == 0 ]]; then
+            crontab -l 2>/dev/null | grep -v 'backup_auto' | crontab -
+            logmsg "${color_yellow}Автоматические копии выключены.${style_plain}"
+        fi
+    else
+        confirm_options "Включить автоматические копии базы раз в неделю (по воскресеньям в 04:30, хранится последних ${BACKUP_KEEP:-10})" "y"
+        if [[ $? == 0 ]]; then
+            { crontab -l 2>/dev/null | grep -v 'backup_auto'; echo "$line"; } | crontab -
+            logmsg "${color_green}${ICO_MAP[INF]} Автоматические копии включены.${style_plain}"
+            if ! pgrep -x crond >/dev/null 2>&1 && ! pgrep -x cron >/dev/null 2>&1; then
+                logmsg "${color_yellow}${ICO_MAP[WAR]} Служба cron сейчас не запущена: без неё копии по расписанию делаться не будут.${style_plain}"
+            fi
+        fi
     fi
 }
          
@@ -2401,6 +2789,283 @@ update_geo() {
 	fi
 }
 
+# Печатает одну строку отчёта диагностики и считает итоги. Параметры: 1 — уровень (ok, warn или fail), 2 — текст.
+# Счётчики лежат в переменных DOC_OK, DOC_WARN, DOC_FAIL (их обнуляет doctor).
+doctor_line() {
+    case "$1" in
+        ok)   echo -e "  ${color_green}✔${style_plain} $2"; DOC_OK=$((DOC_OK + 1)) ;;
+        warn) echo -e "  ${color_yellow}⚠${style_plain} $2"; DOC_WARN=$((DOC_WARN + 1)) ;;
+        *)    echo -e "  ${color_red}✘${style_plain} $2"; DOC_FAIL=$((DOC_FAIL + 1)) ;;
+    esac
+}
+
+# Пункт меню «Диагностика» (команда x-ui doctor): проверяет установку и подсказывает, что исправить.
+# Проверяется: Entware и процессор, место на диске, панель и автозапуск, порт, наш скрипт и команда x-ui, права на ключ и базу,
+# HTTPS и срок сертификата, время и доступ к GitHub, нужные программы, ядро Xray, целостность базы, cron.
+# Ничего не меняет. Код возврата 0, если ошибок (✘) нет, иначе 1: так диагностику можно использовать в скриптах.
+doctor() {
+    DOC_OK=0
+    DOC_WARN=0
+    DOC_FAIL=0
+    echo -e "\n###############################################\n"
+    echo -e "              ДИАГНОСТИКА $SHELL_SHORT_NAME"
+    echo -e "\n###############################################\n"
+
+    # --- система ---
+    if [[ -x "$DIR_ENTWARE/bin/opkg" ]]; then
+        doctor_line ok "Entware найден ($DIR_ENTWARE/bin/opkg)"
+    else
+        doctor_line fail "Entware не найден: скрипт рассчитан на Entware"
+    fi
+    local arch
+    arch=$(check_architecture 1 >/dev/null 2>&1; echo "$ARCHITECTURE")
+    if [[ -n "$arch" ]]; then
+        doctor_line ok "Процессор: $arch (поддерживается)"
+    else
+        doctor_line fail "Процессор $(uname -m) не поддерживается панелью"
+    fi
+    local free_kb
+    free_kb=$(df -k "$DIR_ENTWARE" 2>/dev/null | tail -n1 | awk '{print $(NF-2)}')
+    if [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+        if (( free_kb < 20480 )); then
+            doctor_line fail "Свободное место на $DIR_ENTWARE: $((free_kb / 1024)) МБ (меньше 20 МБ)"
+        elif (( free_kb < 102400 )); then
+            doctor_line warn "Свободное место на $DIR_ENTWARE: $((free_kb / 1024)) МБ (мало: обновление Xray и копии базы занимают место)"
+        else
+            doctor_line ok "Свободное место на $DIR_ENTWARE: $((free_kb / 1024)) МБ"
+        fi
+    fi
+
+    # --- панель ---
+    if [[ -x "$DIR_PROJECT/$NAME_APP" ]]; then
+        doctor_line ok "Панель установлена, версия ${CURRENT_VERSION_ALL:-неизвестна}"
+    else
+        doctor_line fail "Файл панели не найден или не исполняемый: $DIR_PROJECT/$NAME_APP"
+    fi
+    if check_panel; then
+        doctor_line ok "Панель запущена"
+    else
+        doctor_line fail "Панель не запущена (запустите: $SHELL_SHORT_NAME start)"
+    fi
+    if check_enabled; then
+        doctor_line ok "Автозапуск включён"
+    else
+        doctor_line warn "Автозапуск выключен: после перезагрузки роутера панель не запустится"
+    fi
+    panel_settings_read
+    if [[ -n "$PANEL_PORT" ]] && check_panel && command -v netstat >/dev/null 2>&1; then
+        if netstat -ltn 2>/dev/null | grep -Eq "[:.]${PANEL_PORT}[[:space:]]"; then
+            doctor_line ok "Порт панели $PANEL_PORT слушается"
+        else
+            doctor_line fail "Панель запущена, но порт $PANEL_PORT никто не слушает"
+        fi
+    fi
+
+    # --- наш скрипт ---
+    if [[ "$(head -n 1 "$DIR_PROJECT_SHELL_SCRIPTS" 2>/dev/null)" == "#!$DIR_ENTWARE/bin/bash" ]]; then
+        doctor_line ok "Скрипт управления в порядке ($DIR_PROJECT_SHELL_SCRIPTS)"
+    else
+        doctor_line fail "В $DIR_PROJECT_SHELL_SCRIPTS другой скрипт (не наш): запустите команду установки из README, она восстановит файл"
+    fi
+    if [[ -e "$DIR_INSTALL_LNK" ]]; then
+        doctor_line ok "Команда $SHELL_SHORT_NAME на месте ($DIR_INSTALL_LNK)"
+    else
+        doctor_line warn "Нет команды $DIR_INSTALL_LNK: запустите команду установки из README, она создаст ссылку"
+    fi
+    if [[ ":$PATH:" != *":$DIR_ENTWARE/bin:"* ]]; then
+        doctor_line warn "В PATH нет $DIR_ENTWARE/bin: команду $SHELL_SHORT_NAME нужно запускать по полному пути или выполнить export PATH=$DIR_ENTWARE/sbin:$DIR_ENTWARE/bin:\$PATH"
+    fi
+
+    # --- права на секреты ---
+    local f perm
+    for f in "$PANEL_KEY" "$DB"; do
+        [[ -n "$f" && -f "$f" ]] || continue
+        perm=$(ls -l "$f" 2>/dev/null | cut -c5-10)
+        if [[ "$perm" == "------" ]]; then
+            doctor_line ok "Права на $f закрыты от посторонних"
+        else
+            doctor_line warn "Файл $f доступен посторонним: выполните chmod -R go-rwx $DIR_PROJECT/db $DIR_PROJECT/cert $DIR_PROJECT/backup"
+        fi
+    done
+
+    # --- HTTPS ---
+    if [[ -z "$PANEL_CERT" ]]; then
+        doctor_line warn "HTTPS не включён: панель работает по HTTP (включить: пункт про SSL-сертификат в меню)"
+    elif [[ ! -f "$PANEL_CERT" || ! -f "$PANEL_KEY" ]]; then
+        doctor_line fail "Сертификат указан, но файлов нет: панель работает по HTTP (создайте сертификат или уберите настройку)"
+    else
+        local exp now days
+        exp=$(cert_expiry_epoch "$PANEL_CERT")
+        printf -v now '%(%s)T' -1
+        if [[ -z "$exp" ]]; then
+            doctor_line warn "Не удалось прочитать срок действия сертификата $PANEL_CERT"
+        elif (( exp <= now )); then
+            doctor_line fail "SSL-сертификат истёк: создайте новый"
+        elif (( (exp - now) / 86400 <= 30 )); then
+            doctor_line warn "SSL-сертификат истекает через $(( (exp - now) / 86400 )) дн.: пора обновить"
+        else
+            doctor_line ok "SSL-сертификат действителен ещё $(( (exp - now) / 86400 )) дн."
+        fi
+    fi
+
+    # --- время и сеть ---
+    local year
+    printf -v year '%(%Y)T' -1
+    if (( year < 2025 )); then
+        doctor_line fail "Время на роутере неверно (год $year): HTTPS и сертификаты работать не будут"
+    fi
+    local head_out code
+    head_out=$(curl -4 -sI --max-time 8 https://github.com 2>/dev/null)
+    if [[ -n "$head_out" ]]; then
+        doctor_line ok "github.com доступен"
+        # Сравниваем время роутера со временем сервера (заголовок Date: Wed, 05 Nov 2026 12:00:00 GMT)
+        local dline dow dd mon yy tm mm h mi s now2 skew months=" Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec" pre
+        dline=$(echo "$head_out" | grep -i '^date:' | head -n1 | tr -d '\r')
+        read -r _ _ dd mon yy tm _ <<< "$dline"
+        if [[ -n "$mon" && "$months" == *" $mon"* ]]; then
+            pre="${months%% $mon*}"
+            mm=$(( $(wc -w <<< "$pre") + 1 ))
+            IFS=: read -r h mi s <<< "$tm"
+            utc_epoch "$yy" "$mm" "$dd" "$h" "$mi" "$s"
+            printf -v now2 '%(%s)T' -1
+            skew=$(( now2 - UTC_EPOCH ))
+            (( skew < 0 )) && skew=$(( -skew ))
+            if (( skew > 300 )); then
+                doctor_line warn "Время роутера расходится с реальным на $(( skew / 60 )) мин.: проверьте синхронизацию времени"
+            else
+                doctor_line ok "Время роутера совпадает с реальным"
+            fi
+        fi
+    else
+        doctor_line fail "github.com недоступен: не будут работать установка, обновления и проверка версий"
+    fi
+    code=$(curl -4 -s -o /dev/null -w '%{http_code}' --max-time 8 https://raw.githubusercontent.com 2>/dev/null)
+    if [[ -n "$code" && "$code" != "000" ]]; then
+        doctor_line ok "raw.githubusercontent.com доступен (скрипт обновляется отсюда)"
+    else
+        doctor_line warn "raw.githubusercontent.com недоступен: обновление самого скрипта не заработает"
+    fi
+
+    # --- программы ---
+    local c
+    for c in curl openssl sqlite3 tar pgrep; do
+        if command -v "$c" >/dev/null 2>&1; then
+            :
+        else
+            doctor_line fail "Нет программы $c (установка: opkg install $c)"
+        fi
+    done
+
+    # --- ядро и база ---
+    local xv
+    xv=$(xray_version)
+    if [[ -n "$xv" ]]; then
+        doctor_line ok "Ядро Xray запускается, версия $xv"
+    else
+        doctor_line fail "Ядро Xray не найдено или не запускается: $DIR_PROJECT/bin"
+    fi
+    if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$DB" ]]; then
+        if [[ "$(sqlite3 -readonly "$DB" 'PRAGMA quick_check;' 2>/dev/null | head -n1)" == "ok" ]]; then
+            doctor_line ok "База данных цела"
+        else
+            doctor_line fail "База данных повреждена: восстановите её из резервной копии (меню → Управление настройками)"
+        fi
+    fi
+
+    # --- cron (нужен для продления сертификата и резервных копий по расписанию) ---
+    local cron_jobs=0
+    if command -v crontab >/dev/null 2>&1; then
+        crontab -l 2>/dev/null | grep -Eq 'acme\.sh --cron|backup_auto' && cron_jobs=1
+    fi
+    if [[ $cron_jobs -eq 1 ]]; then
+        if pgrep -x crond >/dev/null 2>&1 || pgrep -x cron >/dev/null 2>&1; then
+            doctor_line ok "Задания cron есть, служба cron запущена"
+        else
+            doctor_line warn "Задания cron есть, но служба cron не запущена: продление сертификата и копии по расписанию не сработают"
+        fi
+    elif ! command -v crontab >/dev/null 2>&1; then
+        doctor_line warn "Нет планировщика cron: автопродление сертификата и копии по расписанию недоступны (установка: opkg install cron)"
+    fi
+
+    echo -e "\n  Итого: ${color_green}✔ $DOC_OK${style_plain}   ${color_yellow}⚠ $DOC_WARN${style_plain}   ${color_red}✘ $DOC_FAIL${style_plain}\n"
+    if [[ $DOC_FAIL -gt 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# Пункт меню «Доступ из интернета» — мастер, который открывает панель для доступа из интернета или возвращает доступ только из локальной сети.
+# По умолчанию панель слушает только адрес роутера в локальной сети (так безопаснее всего). Мастер меняет адрес прослушивания
+# (0.0.0.0 — все адреса) и подсказывает, что ещё нужно сделать: открыть порт в межсетевом экране роутера, включить HTTPS, задать сложный пароль.
+# Межсетевым экраном Keenetic скрипт управлять не может: порт нужно открыть самому в настройках роутера.
+remote_access() {
+    local bin="$DIR_PROJECT/$NAME_APP" lan scheme="http" https=0 open=0
+    if [[ ! -x "$bin" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Панель не установлена.${style_plain}"
+        return 1
+    fi
+    if ! panel_settings_read; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Не удалось прочитать настройки панели (нужны база данных и программа sqlite3).${style_plain}"
+        return 1
+    fi
+    lan=$(lan_ip)
+    [[ -z "$PANEL_LISTEN" || "$PANEL_LISTEN" == "0.0.0.0" ]] && open=1
+    if [[ -n "$PANEL_CERT" && -n "$PANEL_KEY" && -f "$PANEL_CERT" && -f "$PANEL_KEY" ]]; then
+        https=1
+        scheme="https"
+    fi
+    echo -e "\n###############################################\n"
+    echo -e "              ДОСТУП ИЗ ИНТЕРНЕТА"
+    echo -e "\n###############################################\n"
+    if [[ $open -eq 1 ]]; then
+        logmsg "${color_yellow}${ICO_MAP[WAR]} Сейчас панель открыта: она слушает все адреса (порт $PANEL_PORT).${style_plain}"
+        confirm_options "Вернуть доступ только из локальной сети (${lan:-IP роутера})" "y"
+        if [[ $? != 0 ]]; then
+            return 0
+        fi
+        if [[ -z "$lan" ]]; then
+            logmsg "${color_red}${ICO_MAP[ERR]} Не удалось определить IP роутера. Задайте адрес прослушивания через «Изменить настройки панели».${style_plain}"
+            return 1
+        fi
+        "$bin" setting -listenIP "$lan" >/dev/null 2>&1
+        confirm_restart
+        logmsg "${color_green}${ICO_MAP[INF]} Панель снова доступна только из локальной сети: ${scheme}://${lan}:${PANEL_PORT}${PANEL_PATH}${style_plain}"
+        return 0
+    fi
+
+    logmsg "${color_green}Сейчас панель доступна только из локальной сети: адрес ${PANEL_LISTEN}, порт $PANEL_PORT.${style_plain}"
+    echo -e "Открывать панель в интернет стоит, только если это действительно нужно: к ней смогут подбирать пароль все желающие."
+    echo -e "Что желательно сделать до открытия:"
+    echo -e "  • включить HTTPS (лучше сертификат для своего домена, пункт «Получить SSL-сертификат»);"
+    echo -e "  • задать сложные логин и пароль и не оставлять стандартный путь панели;"
+    echo -e "  • открыть TCP-порт $PANEL_PORT в межсетевом экране роутера (скрипт этого сделать не может)."
+    if [[ $https -eq 0 ]]; then
+        logmsg "${color_red}${ICO_MAP[WAR]} HTTPS не включён: логин и пароль будут передаваться по интернету открытым текстом.${style_plain}"
+        confirm_options "Всё равно открыть панель без HTTPS" "n" "" "$color_red"
+        if [[ $? != 0 ]]; then
+            logmsg "${color_yellow}Отменено. Сначала включите HTTPS (пункты про SSL-сертификат в меню).${style_plain}"
+            return 0
+        fi
+    fi
+    confirm_options "Открыть панель для доступа из интернета (слушать на всех адресах)" "n" "" "$color_red"
+    if [[ $? != 0 ]]; then
+        return 0
+    fi
+    "$bin" setting -listenIP 0.0.0.0 >/dev/null 2>&1
+    panel_settings_read
+    if [[ -n "$PANEL_LISTEN" && "$PANEL_LISTEN" != "0.0.0.0" ]]; then
+        logmsg "${color_red}${ICO_MAP[ERR]} Панель не приняла новый адрес прослушивания.${style_plain}"
+        return 1
+    fi
+    confirm_restart
+    local ext
+    ext=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null)
+    logmsg "${color_green}${ICO_MAP[INF]} Панель открыта для доступа из интернета.${style_plain}"
+    echo -e "Адрес из интернета: ${scheme}://${ext:-<внешний IP или домен>}:${PANEL_PORT}${PANEL_PATH}"
+    echo -e "Не забудьте открыть TCP-порт ${PANEL_PORT} в межсетевом экране роутера (Сетевые правила → Межсетевой экран)."
+    echo -e "Вернуть доступ только из локальной сети можно тем же пунктом меню."
+}
+
 # Восстановление установки: права на файлы, перенос скрипта, миграция базы, VACUUM и проверка целостности.
 repair(){
     confirm_options "Вы действительно хотите восстановить установку $SHELL_SHORT_NAME" "n"
@@ -2446,6 +3111,9 @@ status::Проверить состояние $SHELL_SHORT_NAME
 [br]
 enable::Включить автозапуск $SHELL_SHORT_NAME
 disable::Отключить автозапуск $SHELL_SHORT_NAME
+[br]
+doctor::Диагностика (проверка установки)
+remote_access::Доступ из интернета (мастер)
 "
 # Подменю «своя версия».
 menu_install_custom="
@@ -2462,6 +3130,8 @@ update_all::Обновить всё
 update_script::Обновить только скрипт
 update_panel::Обновить только панель
 update_xray::Обновить только XRay
+update_xray_custom::Установить свою версию XRay
+rollback_xray::Откатить XRay (вернуть прежнюю версию)
 "
 # Подменю настроек.
 menu_settings="
@@ -2493,6 +3163,7 @@ show_main_menu::${color_magenta}Главное меню${style_plain}
 backup::Создать резервную копию базы данных панели
 restore::Восстановить базу данных панели из копии
 delete_old_backups::Удалить старые резервные копии
+backup_cron::Автоматические копии по расписанию (вкл/выкл)
 "
 # Способы сжатия резервной копии (ключ = имя программы сжатия).
 menu_archive="
@@ -2619,6 +3290,85 @@ load_latest_versions() {
         echo -ne "\033[K"
     fi
 }
+# Экранирует строку для JSON и печатает её в кавычках (обратная косая черта, кавычки, переводы строки, табуляция).
+json_str() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    printf '"%s"' "$s"
+}
+
+# Печатает состояние панели в формате JSON (команда x-ui status --json): версии скрипта, панели и Xray, работает ли панель,
+# включён ли автозапуск, адрес и порт, HTTPS и сколько дней осталось у сертификата (null, если сертификата нет или срок неизвестен).
+# Пригодно для мониторинга и скриптов. Ничего, кроме JSON, не печатает. Код возврата 0, если панель работает.
+status_json() {
+    local running=false enabled=false https=false days=null port=null exp now
+    check_panel && running=true
+    check_enabled && enabled=true
+    if panel_settings_read; then
+        port="$PANEL_PORT"
+        if [[ -n "$PANEL_CERT" && -n "$PANEL_KEY" && -f "$PANEL_CERT" && -f "$PANEL_KEY" ]]; then
+            https=true
+            exp=$(cert_expiry_epoch "$PANEL_CERT")
+            if [[ -n "$exp" ]]; then
+                printf -v now '%(%s)T' -1
+                days=$(( (exp - now) / 86400 ))
+            fi
+        fi
+    fi
+    printf '{\n'
+    printf '  "script": %s,\n' "$(json_str "$CURRENT_VERSION_SCRIPT")"
+    printf '  "panel": %s,\n' "$(json_str "$CURRENT_VERSION_ALL")"
+    printf '  "xray": %s,\n' "$(json_str "$(xray_version)")"
+    printf '  "running": %s,\n' "$running"
+    printf '  "autostart": %s,\n' "$enabled"
+    printf '  "listen": %s,\n' "$(json_str "$PANEL_LISTEN")"
+    printf '  "port": %s,\n' "$port"
+    printf '  "path": %s,\n' "$(json_str "$PANEL_PATH")"
+    printf '  "https": %s,\n' "$https"
+    printf '  "cert_days_left": %s\n' "$days"
+    printf '}\n'
+    [[ "$running" == true ]]
+}
+
+# Печатает одну строку отчёта о версии и возвращает код: 0 — стоит последняя версия, 10 — есть обновление, 2 — проверить не удалось.
+# Параметры: 1 — название, 2 — установленная версия, 3 — последняя версия на GitHub.
+update_row() {
+    local label="$1" cur="$2" last="$3"
+    if [[ -z "$cur" || -z "$last" ]]; then
+        echo -e "$label ${cur:-?}: проверить не удалось $(status_dot red)"
+        return 2
+    elif [[ "$(version_cmp "$cur" "$last")" == "-1" ]]; then
+        echo -e "$label $cur: доступна ${last#v} $(status_dot yellow)"
+        return 10
+    fi
+    echo -e "$label $cur: последняя версия $(status_dot green)"
+    return 0
+}
+
+# Проверка наличия новых версий скрипта, панели и Xray (команда x-ui update --check). Всегда спрашивает GitHub заново (кэш не используется)
+# и обновляет кэш для точек в шапке меню. Ничего не устанавливает.
+# Код возврата: 0 — всё последнее, 10 — есть обновления, 2 — что-то проверить не удалось (удобно для cron и мониторинга).
+check_updates() {
+    local rc any_update=0 any_fail=0
+    refresh_latest_versions
+    update_row "Скрипт:" "$CURRENT_VERSION_SCRIPT" "$LATEST_SCRIPT"; rc=$?
+    [[ $rc -eq 10 ]] && any_update=1
+    [[ $rc -eq 2 ]] && any_fail=1
+    update_row "Панель: " "$CURRENT_VERSION_ALL" "$LATEST_PANEL"; rc=$?
+    [[ $rc -eq 10 ]] && any_update=1
+    [[ $rc -eq 2 ]] && any_fail=1
+    update_row "XRay:   " "$(xray_version)" "$LATEST_XRAY"; rc=$?
+    [[ $rc -eq 10 ]] && any_update=1
+    [[ $rc -eq 2 ]] && any_fail=1
+    [[ $any_fail -eq 1 ]] && return 2
+    [[ $any_update -eq 1 ]] && return 10
+    return 0
+}
+
 
 # Очищает экран и печатает логотип.
 show_logo() {
@@ -2688,7 +3438,7 @@ show_logo
 	# Собираем меню: «Выход» + пункты установки (если панели нет) или пункты управления (если панель есть).
 	show_main_menu=$menu_exit
     if [[ -f $DIR_PROJECT/$NAME_APP ]]; then
-        echo -e "Панель ${SHELL_SHORT_NAME^^}:     $CURRENT_VERSION_ALL${dot_panel}" && show_xray_version && show_main_menu+=$menu_extra && echo -e "" && show_status && echo -e ""
+        echo -e "Панель ${SHELL_SHORT_NAME^^}:     $CURRENT_VERSION_ALL${dot_panel}" && show_xray_version && show_panel_info && show_time_warning && show_main_menu+=$menu_extra && echo -e "" && show_status && echo -e ""
 	else
         show_main_menu+=$menu_install
     fi
@@ -2756,10 +3506,13 @@ else
     if [[ $# -gt 0 ]]; then
     # Скрипт вызван с командой, например: x-ui restart, x-ui ssl_domain, x-ui auto_install.
     COMMANDS_CALL=$1 && commands_arg=$2
+        # Код возврата команды сохраняем и отдаём как код выхода скрипта (нужно для cron и мониторинга: x-ui update --check, x-ui doctor)
         if check_status 2>/dev/null; [[ $? -eq 2 ]]; then
             show_main_menu "$COMMANDS_CALL" "$commands_arg"
+            CLI_RC=$?
         elif check_status 2>/dev/null; [[ ! $? -eq 2 ]]; then
             check_install && safe_call_function "$@"
+            CLI_RC=$?
         else
             logmsg "${color_red}${ICO_MAP[ERR]} Сначала установите панель! ${style_plain}" && bye
         fi
@@ -2772,5 +3525,6 @@ else
         fi
     fi
     check_show_main_menu
+    exit "${CLI_RC:-0}"
 fi
 # AUTO_END ------------------------------------------------------------

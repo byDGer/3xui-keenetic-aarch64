@@ -19,8 +19,9 @@
 # заменяет /opt/etc/x-ui/x-ui.sh версией из репозитория, пересоздаёт команду /opt/bin/x-ui и запускает панель,
 # если она не работает. Это лечит ошибку «/bin/bash: bad interpreter» после обновления панели в старых версиях.
 #
-# Необязательная переменная:
-#   XUI_SH_URL=...   откуда брать x-ui.sh (по умолчанию из репозитория byDGer/3xui-keenetic-aarch64)
+# Необязательные переменные:
+#   XUI_SH_URL=...    откуда брать x-ui.sh (по умолчанию из репозитория byDGer/3xui-keenetic-aarch64)
+#   XUI_SKIP_HASH=1   не проверять контрольную сумму x-ui.sh (файл x-ui.sh.sha256 рядом со скриптом)
 set -eu
 
 XUI_SH_URL="${XUI_SH_URL:-https://raw.githubusercontent.com/byDGer/3xui-keenetic-aarch64/main/x-ui.sh}"
@@ -59,6 +60,18 @@ main() {
   rm -f x-ui.sh
   curl -fsSL "$XUI_SH_URL" -o x-ui.sh || die "не удалось скачать $XUI_SH_URL"
   head -n 1 x-ui.sh | grep -q '^#!' || die "скачанный файл не похож на скрипт"
+  # Контрольная сумма: рядом со скриптом в репозитории лежит файл x-ui.sh.sha256. Если сумма есть и не совпала, установка отменяется.
+  # Если файла нет (например, свой источник скрипта), только предупреждаем. XUI_SKIP_HASH=1 отключает проверку.
+  if [ "${XUI_SKIP_HASH:-0}" != "1" ]; then
+    expected=$(curl -fsSL "${XUI_SH_URL}.sha256" 2>/dev/null | awk '{print $1}' | head -n 1)
+    if [ -n "$expected" ] && command -v sha256sum >/dev/null 2>&1; then
+      actual=$(sha256sum x-ui.sh | awk '{print $1}')
+      [ "$actual" = "$expected" ] || die "контрольная сумма x-ui.sh не совпала. Если файлы в репозитории только что обновлены, подождите 5 минут (кэш GitHub) и повторите. Отключить проверку: XUI_SKIP_HASH=1"
+      echo "    Контрольная сумма x-ui.sh совпала"
+    else
+      echo "    Предупреждение: контрольную сумму x-ui.sh проверить не удалось (нет файла .sha256 или программы sha256sum)"
+    fi
+  fi
   # Проверка: панель в этом скрипте должна качаться именно с MHSanaei/3x-ui
   grep -q "github.com/$PANEL_REPO/releases/download" x-ui.sh \
     || die "в скачанном x-ui.sh панель скачивается не с $PANEL_REPO"
