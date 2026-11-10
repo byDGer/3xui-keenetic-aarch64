@@ -60,7 +60,7 @@ color_bgreen='\033[1;32m'
 declare -A ICO_MAP=( [GOOD]="[ ✔ ]" [BAD]="[ ✘ ]" [WORK]="[ ⚙ ]" [INF]="[INF]" [ERR]="[ERR]" [WAR]="[⚠️]" )
 
 # Версия этого скрипта. При выпуске обновления её нужно увеличить: по ней скрипт понимает, что на GitHub есть новая версия.
-CURRENT_VERSION_SCRIPT="1.1.0"
+CURRENT_VERSION_SCRIPT="1.1.1"
 # Репозиторий, из которого скрипт обновляет сам себя (ветка main).
 SCRIPT_REPO="byDGer/3xui-keenetic-aarch64"
 SCRIPT_RAW="https://raw.githubusercontent.com/$SCRIPT_REPO"
@@ -1566,18 +1566,17 @@ view_panel() {
 }
 
 # Запускает панель в фоне (если ещё не запущена) и проверяет, что процесс появился.
+# Вывод панели при запуске сохраняется в файл /opt/var/log/x-ui-panel.out (при каждом запуске файл создаётся заново).
+# Если панель не запустилась, последние строки этого вывода показываются на экране: так видна настоящая причина (ошибка в настройках, сертификате и т. п.).
 start() {
     check_status; local status=$?
     if [[ $status == 0 ]]; then
         echo ""
         logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME уже запущен, повторный запуск не требуется!${style_plain}"
     else
-        tmpfile=$(mktemp)
-        # Запускаем панель в фоне с повышенным приоритетом. Вывод сохраняем во временный файл и добавляем в журнал.
-        nice -n -19 "$DIR_PROJECT/$NAME_APP" run >"$tmpfile" 2>&1 & disown
-        output=$(cat "$tmpfile")
-        echo "$output" >> "$DIR_LOGFILE"
-        rm -f "$tmpfile"
+        local panel_out="${DIR_LOGFILE%/*}/x-ui-panel.out"
+        # Запускаем панель в фоне с повышенным приоритетом, вывод пишем в файл
+        nice -n -19 "$DIR_PROJECT/$NAME_APP" run >"$panel_out" 2>&1 & disown
         logmsg "${ICO_MAP[WORK]} загрузка..."
         sleep 1
         if ! check_panel; then
@@ -1585,7 +1584,17 @@ start() {
         fi
         sleep 2
         check_status; local status2=$?
-        [[ $status2 == 0 ]] && logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME успешно запущен${style_plain}" || logmsg "${color_red}${ICO_MAP[ERR]} не удалось запустить $SHELL_SHORT_NAME, возможно, запуск занимает больше двух секунд. Проверьте журнал позже${style_plain}"
+        if [[ $status2 == 0 ]]; then
+            logmsg "${color_green}${ICO_MAP[INF]} $SHELL_SHORT_NAME успешно запущен${style_plain}"
+        else
+            logmsg "${color_red}${ICO_MAP[ERR]} не удалось запустить $SHELL_SHORT_NAME, возможно, запуск занимает больше двух секунд. Проверьте журнал позже${style_plain}"
+            if [[ -s "$panel_out" ]]; then
+                logmsg "${color_yellow}Вывод панели при запуске ($panel_out):${style_plain}"
+                tail -n 15 "$panel_out"
+            else
+                logmsg "${color_yellow}Панель ничего не вывела. Запустите её вручную и посмотрите ошибку: $DIR_PROJECT/$NAME_APP run${style_plain}"
+            fi
+        fi
     fi
 }
 
@@ -2160,11 +2169,27 @@ ssl_remove() {
     view_panel
 }
 
-# Работает ли панель: ищет запущенный процесс с именем xui. Код 0 — работает.
-# Ищется точное имя процесса (pgrep -x), а не любая строка xui в командной строке: иначе «работающей» считалась бы и сторонняя программа,
-# у которой в параметрах встретилось xui.
+# Работает ли панель: ищет запущенный процесс панели. Код 0 — работает.
+# Процессы просматриваются прямо в /proc средствами bash: берётся первый аргумент командной строки каждого процесса, и он должен быть
+# путём к панели (/opt/etc/x-ui/xui) или иметь имя xui. Так результат не зависит от версии pgrep в busybox (у разных сборок
+# опции -x и -f работают по-разному) и не принимает за панель сторонние программы, у которых xui встретилось только в параметрах.
+# Если /proc недоступен, используется запасной вариант pgrep -f.
 check_panel() {
-    pgrep -x "$NAME_APP" > /dev/null
+    local f arg0 found=0
+    for f in /proc/[0-9]*/cmdline; do
+        [[ -r "$f" ]] || continue
+        found=1
+        arg0=""
+        IFS= read -r -d '' arg0 < "$f" 2>/dev/null
+        if [[ "$arg0" == "$DIR_PROJECT/$NAME_APP" || "${arg0##*/}" == "$NAME_APP" ]]; then
+            return 0
+        fi
+    done
+    if [[ $found -eq 0 ]]; then
+        pgrep -f "$NAME_APP" > /dev/null
+        return $?
+    fi
+    return 1
 }
 
 # Печатает слово enabled, если автозапуск включён (есть ссылка в /opt/etc/init.d).
